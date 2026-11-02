@@ -1,2 +1,4 @@
 demucs
 numpy
+faster-whisper
+av<19

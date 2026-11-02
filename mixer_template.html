@@ -22,6 +22,20 @@
   .val { text-align:right; font-variant-numeric:tabular-nums; font-weight:600; }
   .btns { display:flex; gap:6px; }
   #status { opacity:.7; margin-bottom:12px; }
+
+  /* Letra sincronizada */
+  #letra-wrap { margin-bottom:20px; }
+  #letra { position:relative; height:190px; overflow-y:auto; background:#1c1c26; border-radius:8px;
+           padding:80px 18px; text-align:center; scrollbar-width:thin; }
+  #letra .l { padding:6px 0; font-size:18px; opacity:.3; cursor:pointer;
+              transition:opacity .2s, color .2s; }
+  #letra .l:hover { opacity:.6; }
+  #letra .l.atual { opacity:1; color:#e0a030; font-size:22px; font-weight:600; }
+  #letra-ctl { display:flex; gap:10px; align-items:center; justify-content:center;
+               margin-top:8px; font-size:13px; }
+  #letra-ctl button { padding:4px 10px; font-size:12px; }
+  #letra-ctl .fonte { opacity:.55; }
+  #off-val { min-width:48px; text-align:center; font-variant-numeric:tabular-nums; }
 </style>
 </head>
 <body>
@@ -33,6 +47,17 @@
   <input id="seek" type="range" min="0" max="1000" value="0">
   <span id="time">0:00</span>
 </div>
+
+<div id="letra-wrap" hidden>
+  <div id="letra"></div>
+  <div id="letra-ctl">
+    <button id="off-menos" title="A letra aparece mais cedo">◀ adiantar</button>
+    <span id="off-val">0.0s</span>
+    <button id="off-mais" title="A letra aparece mais tarde">atrasar ▶</button>
+    <span class="fonte" id="letra-fonte"></span>
+  </div>
+</div>
+
 <div id="stems"></div>
 
 <script>
@@ -42,6 +67,7 @@ const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate:
 const VOL_INICIAL = 10;          // volume inicial de cada faixa (0 a 100)
 const S = {};                    // estado por stem
 let sources = [], playing = false, startedAt = 0, offset = 0, duration = 0, seeking = false;
+let LETRA = [], linhasEl = [], idxAtual = -1, offsetLetra = 0;   // letra sincronizada
 
 const fmt = t => Math.floor(t/60) + ":" + String(Math.floor(t%60)).padStart(2, "0");
 
@@ -93,7 +119,17 @@ function pause() {
 
 function stop() { pause(); offset = 0; updateUI(0); }
 
+// Pula para um ponto da música (em segundos), mantendo play/pause como estava
+function irPara(s) {
+  const was = playing;
+  pause();
+  offset = Math.max(0, Math.min(duration, s));
+  updateUI(offset);
+  if (was) play();
+}
+
 function updateUI(t) {
+  atualizarLetra(t);
   if (seeking) return;
   document.getElementById("seek").value = duration ? (t / duration) * 1000 : 0;
   document.getElementById("time").textContent = fmt(t) + " / " + fmt(duration);
@@ -107,6 +143,67 @@ function tick() {
   requestAnimationFrame(tick);
 }
 
+// ---------- Letra sincronizada ----------
+// Lê o letra.json (gerado pelo main.py). Se não existir, o painel simplesmente não aparece.
+async function carregarLetra() {
+  let dados;
+  try {
+    const r = await fetch("letra.json?v=" + Date.now());
+    if (!r.ok) return;
+    dados = await r.json();
+  } catch (e) { return; }
+
+  LETRA = (dados.linhas || []).filter(l => l.text && typeof l.t === "number");
+  if (!LETRA.length) return;
+
+  const box = document.getElementById("letra");
+  for (const l of LETRA) {
+    const d = document.createElement("div");
+    d.className = "l";
+    d.textContent = l.text;
+    d.title = "Clique para ir até este trecho";
+    d.onclick = () => irPara(l.t + offsetLetra);
+    box.appendChild(d);
+    linhasEl.push(d);
+  }
+  document.getElementById("letra-fonte").textContent =
+    dados.fonte === "lrc" ? "· letra sincronizada (.lrc)" : "· transcrição automática (pode ter erros)";
+  document.getElementById("letra-wrap").hidden = false;
+}
+
+// Última linha cujo início já passou (busca binária)
+function indiceLetra(t) {
+  const x = t - offsetLetra;
+  let lo = 0, hi = LETRA.length - 1, r = -1;
+  while (lo <= hi) {
+    const m = (lo + hi) >> 1;
+    if (LETRA[m].t <= x) { r = m; lo = m + 1; } else { hi = m - 1; }
+  }
+  return r;
+}
+
+function atualizarLetra(t) {
+  if (!LETRA.length) return;
+  const i = indiceLetra(t);
+  if (i === idxAtual) return;
+  idxAtual = i;
+  linhasEl.forEach((el, k) => el.classList.toggle("atual", k === i));
+  const box = document.getElementById("letra");
+  const alvo = i >= 0 ? linhasEl[i].offsetTop - box.clientHeight / 2 + linhasEl[i].offsetHeight / 2 : 0;
+  box.scrollTo({ top: alvo, behavior: "smooth" });
+}
+
+// Ajuste fino da sincronia (passos de 0.1s). Positivo = a letra aparece mais tarde.
+function ajustarLetra(delta) {
+  offsetLetra = Math.round((offsetLetra + delta) * 10) / 10;
+  document.getElementById("off-val").textContent = (offsetLetra > 0 ? "+" : "") + offsetLetra.toFixed(1) + "s";
+  idxAtual = -2;   // força recalcular a linha atual
+  atualizarLetra(playing ? ctx.currentTime - startedAt : offset);
+}
+document.getElementById("off-menos").onclick = () => ajustarLetra(-0.1);
+document.getElementById("off-mais").onclick = () => ajustarLetra(+0.1);
+
+// ---------- Carregamento das faixas ----------
 async function carregar(n) {
   const resp = await fetch(n + ".wav");
   return ctx.decodeAudioData(await resp.arrayBuffer());
@@ -117,6 +214,7 @@ async function init() {
   const status = document.getElementById("status");
   let feitos = 0;
   status.textContent = `Carregando faixas… 0/${STEMS.length}`;
+  carregarLetra();   // em paralelo com as faixas
   // Baixa e decodifica todas as faixas ao mesmo tempo (bem mais rápido que uma por vez)
   const buffers = await Promise.all(STEMS.map(async n => {
     const b = await carregar(n);
@@ -169,8 +267,9 @@ const seekEl = document.getElementById("seek");
 // Enquanto arrasta, só mostra o tempo; o áudio só pula quando você solta a barra
 seekEl.oninput = e => {
   seeking = true;
-  document.getElementById("time").textContent =
-    fmt((e.target.value / 1000) * duration) + " / " + fmt(duration);
+  const t = (e.target.value / 1000) * duration;
+  document.getElementById("time").textContent = fmt(t) + " / " + fmt(duration);
+  atualizarLetra(t);   // a letra acompanha enquanto você arrasta
 };
 seekEl.onchange = e => {
   seeking = false;
