@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Musician - Separador de Instrumentos/Vocais</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background:#14141a; color:#eee; margin:0; padding:24px; }
+  h1 { font-size:20px; margin:0 0 16px; }
+  h1 span { font-size:15px; font-weight:400; opacity:.65; }
+  #transport { display:flex; gap:12px; align-items:center; margin-bottom:20px; }
+  button { background:#2a2a36; color:#eee; border:1px solid #3a3a4a; border-radius:6px;
+           padding:8px 14px; cursor:pointer; font-size:14px; }
+  button:hover { background:#34344a; }
+  button.on { background:#e0a030; color:#111; border-color:#e0a030; }
+  button.mute.on { background:#d04a4a; border-color:#d04a4a; color:#fff; }
+  #seek { flex:1; }
+  .stem { display:grid; grid-template-columns:110px 1fr 160px 44px 90px; gap:12px; align-items:center;
+          background:#1c1c26; border-radius:8px; padding:10px 14px; margin-bottom:8px; }
+  .stem canvas { width:100%; height:48px; background:#101016; border-radius:4px; }
+  .name { font-weight:600; text-transform:capitalize; }
+  .val { text-align:right; font-variant-numeric:tabular-nums; font-weight:600; }
+  .btns { display:flex; gap:6px; }
+  #status { opacity:.7; margin-bottom:12px; }
+</style>
+</head>
+<body>
+<h1>🎛️ Musician <span>- O Separador de Instrumentos/Vocais</span></h1>
+<div id="status">Carregando faixas…</div>
+<div id="transport">
+  <button id="play">▶ Play</button>
+  <button id="stop">■ Stop</button>
+  <input id="seek" type="range" min="0" max="1000" value="0">
+  <span id="time">0:00</span>
+</div>
+<div id="stems"></div>
+
+<script>
+const STEMS = __STEMS__;
+// 44100 Hz = mesma taxa dos arquivos do Demucs, evita reamostrar tudo ao decodificar
+const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
+const VOL_INICIAL = 10;          // volume inicial de cada faixa (0 a 100)
+const S = {};                    // estado por stem
+let sources = [], playing = false, startedAt = 0, offset = 0, duration = 0, seeking = false;
+
+const fmt = t => Math.floor(t/60) + ":" + String(Math.floor(t%60)).padStart(2, "0");
+
+function drawWave(canvas, buffer) {
+  const w = canvas.width = canvas.clientWidth * 2, h = canvas.height = 96;
+  const c = canvas.getContext("2d"), data = buffer.getChannelData(0);
+  const step = Math.floor(data.length / w);
+  c.fillStyle = "#e0a030";
+  for (let x = 0; x < w; x++) {
+    let max = 0;
+    for (let i = 0; i < step; i += 50) max = Math.max(max, Math.abs(data[x*step + i] || 0));
+    const bar = max * h;
+    c.fillRect(x, (h - bar) / 2, 1, Math.max(1, bar));
+  }
+}
+
+function applyGains() {
+  const anySolo = STEMS.some(n => S[n].solo);
+  for (const n of STEMS) {
+    const s = S[n];
+    const audible = anySolo ? s.solo : !s.mute;
+    s.gain.gain.setTargetAtTime(audible ? s.vol : 0, ctx.currentTime, 0.01);
+  }
+}
+
+function play() {
+  if (playing) return;
+  if (ctx.state === "suspended") ctx.resume();
+  sources = STEMS.map(n => {
+    const src = ctx.createBufferSource();
+    src.buffer = S[n].buffer;
+    src.connect(S[n].gain);
+    src.start(0, offset);
+    return src;
+  });
+  startedAt = ctx.currentTime - offset;
+  playing = true;
+  document.getElementById("play").textContent = "⏸ Pause";
+  tick();
+}
+
+function pause() {
+  if (!playing) return;
+  sources.forEach(s => { try { s.stop(); } catch(e) {} });
+  offset = ctx.currentTime - startedAt;
+  playing = false;
+  document.getElementById("play").textContent = "▶ Play";
+}
+
+function stop() { pause(); offset = 0; updateUI(0); }
+
+function updateUI(t) {
+  if (seeking) return;
+  document.getElementById("seek").value = duration ? (t / duration) * 1000 : 0;
+  document.getElementById("time").textContent = fmt(t) + " / " + fmt(duration);
+}
+
+function tick() {
+  if (!playing) return;
+  const t = ctx.currentTime - startedAt;
+  if (t >= duration) { stop(); return; }
+  updateUI(t);
+  requestAnimationFrame(tick);
+}
+
+async function carregar(n) {
+  const resp = await fetch(n + ".wav");
+  return ctx.decodeAudioData(await resp.arrayBuffer());
+}
+
+async function init() {
+  const container = document.getElementById("stems");
+  const status = document.getElementById("status");
+  let feitos = 0;
+  status.textContent = `Carregando faixas… 0/${STEMS.length}`;
+  // Baixa e decodifica todas as faixas ao mesmo tempo (bem mais rápido que uma por vez)
+  const buffers = await Promise.all(STEMS.map(async n => {
+    const b = await carregar(n);
+    feitos++;
+    status.textContent = `Carregando faixas… ${feitos}/${STEMS.length}`;
+    return b;
+  }));
+
+  for (const [i, n] of STEMS.entries()) {
+    const buffer = buffers[i];
+    const gain = ctx.createGain();
+    gain.gain.value = VOL_INICIAL / 100;
+    gain.connect(ctx.destination);
+    S[n] = { buffer, gain, vol: VOL_INICIAL / 100, mute: false, solo: false };
+    duration = Math.max(duration, buffer.duration);
+
+    const row = document.createElement("div");
+    row.className = "stem";
+    row.innerHTML = `
+      <div class="name">${n}</div>
+      <canvas></canvas>
+      <input type="range" min="0" max="100" value="${VOL_INICIAL}">
+      <div class="val">${VOL_INICIAL}</div>
+      <div class="btns">
+        <button class="mute">M</button>
+        <button class="solo">S</button>
+      </div>`;
+    container.appendChild(row);
+    drawWave(row.querySelector("canvas"), buffer);
+    await new Promise(r => setTimeout(r, 0));   // deixa a página respirar entre as faixas
+
+    const valEl = row.querySelector(".val");
+    row.querySelector("input").oninput = e => {
+      S[n].vol = e.target.value / 100;
+      valEl.textContent = e.target.value;
+      applyGains();
+    };
+    const bm = row.querySelector(".mute"), bs = row.querySelector(".solo");
+    bm.onclick = () => { S[n].mute = !S[n].mute; bm.classList.toggle("on", S[n].mute); applyGains(); };
+    bs.onclick = () => { S[n].solo = !S[n].solo; bs.classList.toggle("on", S[n].solo); applyGains(); };
+  }
+  document.getElementById("status").textContent =
+    "Pronto! M = mute, S = solo. Mexa nos sliders de volume à vontade.";
+  updateUI(0);
+}
+
+document.getElementById("play").onclick = () => playing ? pause() : play();
+document.getElementById("stop").onclick = stop;
+const seekEl = document.getElementById("seek");
+// Enquanto arrasta, só mostra o tempo; o áudio só pula quando você solta a barra
+seekEl.oninput = e => {
+  seeking = true;
+  document.getElementById("time").textContent =
+    fmt((e.target.value / 1000) * duration) + " / " + fmt(duration);
+};
+seekEl.onchange = e => {
+  seeking = false;
+  const was = playing;
+  pause();
+  offset = (e.target.value / 1000) * duration;
+  updateUI(offset);
+  if (was) play();
+};
+init().catch(err => document.getElementById("status").textContent = "Erro: " + err);
+</script>
+</body>
+</html>
