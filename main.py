@@ -3,6 +3,8 @@ import functools
 import http.server
 import json
 import re
+import difflib
+import unicodedata
 import shutil
 import subprocess
 import sys
@@ -162,9 +164,7 @@ def obter_metadados(arquivo: Path) -> dict | None:
         return None
 
 
-def buscar_lrclib(arquivo: Path) -> list[dict] | None:
-    """Procura letras sincronizadas no LRCLIB."""
-
+def buscar_lrclib(arquivo: Path) -> dict | None:
     metadados = obter_metadados(arquivo)
 
     if not metadados:
@@ -188,9 +188,7 @@ def buscar_lrclib(arquivo: Path) -> list[dict] | None:
         resposta = requests.get(
             "https://lrclib.net/api/get",
             params=params,
-            headers={
-                "User-Agent": "Musician/1.0"
-            },
+            headers={"User-Agent": "Musician/1.0"},
             timeout=15
         )
 
@@ -199,34 +197,38 @@ def buscar_lrclib(arquivo: Path) -> list[dict] | None:
             return None
 
         resposta.raise_for_status()
-
         dados = resposta.json()
 
         if dados.get("instrumental"):
             print("⚠️ LRCLIB identificou a música como instrumental.")
             return None
 
-        letra = dados.get("syncedLyrics")
+        sincronizada = dados.get("syncedLyrics")
 
-        if not letra:
-            if dados.get("plainLyrics"):
-                print("⚠️ Letra encontrada, mas sem sincronização temporal.")
-            else:
-                print("⚠️ LRCLIB não possui letra disponível.")
-            return None
+        if sincronizada:
+            linhas = parsear_lrc(sincronizada)
 
-        linhas = parsear_lrc(letra)
+            if linhas:
+                print(
+                    f"✅ Letra sincronizada encontrada no LRCLIB! "
+                    f"{len(linhas)} linhas."
+                )
+                return {
+                    "tipo": "sincronizada",
+                    "linhas": linhas
+                }
 
-        if not linhas:
-            print("⚠️ A letra encontrada não possui timestamps válidos.")
-            return None
+        simples = dados.get("plainLyrics")
 
-        print(
-            f"✅ Letra encontrada no LRCLIB! "
-            f"{len(linhas)} linhas sincronizadas."
-        )
+        if simples:
+            print("✅ Letra encontrada no LRCLIB, sem timestamps.")
+            return {
+                "tipo": "simples",
+                "letra": simples
+            }
 
-        return linhas
+        print("⚠️ LRCLIB não possui letra disponível.")
+        return None
 
     except requests.exceptions.Timeout:
         print("⚠️ Tempo limite excedido ao consultar LRCLIB.")
@@ -240,6 +242,224 @@ def buscar_lrclib(arquivo: Path) -> list[dict] | None:
         print(f"⚠️ Resposta inválida do LRCLIB: {e}")
         return None
 
+def normalizar_palavra(texto: str) -> str:
+    texto = texto.casefold()
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = texto.encode("ascii", "ignore").decode("ascii")
+    return texto
+
+
+def transcrever_palavras(
+    vocals: Path,
+    modelo_whisper: str,
+    idioma: str | None
+) -> list[dict]:
+
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        raise RuntimeError(
+            "faster-whisper não encontrado. Instale com: "
+            "python -m pip install faster-whisper"
+        )
+
+    print(
+        f"📝 Transcrevendo palavras com o Whisper "
+        f"'{modelo_whisper}'..."
+    )
+
+    modelo = WhisperModel(
+        modelo_whisper,
+        device="cpu",
+        compute_type="int8"
+    )
+
+    segmentos, info = modelo.transcribe(
+        str(vocals),
+        language=idioma,
+        vad_filter=True,
+        beam_size=5,
+        condition_on_previous_text=False,
+        word_timestamps=True
+    )
+
+    palavras = []
+
+    for seg in segmentos:
+        if seg.words:
+            for palavra in seg.words:
+                texto = palavra.word.strip()
+                normalizada = normalizar_palavra(texto)
+
+                if normalizada:
+                    palavras.append({
+                        "word": texto,
+                        "normalizada": normalizada,
+                        "t": palavra.start,
+                        "end": palavra.end
+                    })
+
+        print(
+            f"\r   {seg.end:6.0f}s / {info.duration:.0f}s",
+            end="",
+            flush=True
+        )
+
+    print()
+
+    if not palavras:
+        raise RuntimeError(
+            "O Whisper não conseguiu identificar os tempos das palavras."
+        )
+
+    return palavras
+
+def sincronizar_letra_simples(
+    letra: str,
+    transcricao: list[dict]
+) -> list[dict]:
+
+    linhas_letra = [
+        linha.strip()
+        for linha in letra.splitlines()
+        if linha.strip()
+    ]
+
+    if not linhas_letra or not transcricao:
+        return []
+
+    tokens_letra = []
+    intervalos_linhas = []
+
+    for indice_linha, linha in enumerate(linhas_letra):
+        inicio = len(tokens_letra)
+
+        palavras = re.findall(r"\b[\w']+\b", linha.casefold())
+
+        for palavra in palavras:
+            normalizada = normalizar_palavra(palavra)
+
+            if normalizada:
+                tokens_letra.append(normalizada)
+
+        fim = len(tokens_letra)
+
+        if fim > inicio:
+            intervalos_linhas.append((indice_linha, inicio, fim))
+
+    tokens_audio = [
+        palavra["normalizada"]
+        for palavra in transcricao
+    ]
+
+    if not tokens_letra or not tokens_audio:
+        return []
+
+    comparacao = difflib.SequenceMatcher(
+        None,
+        tokens_letra,
+        tokens_audio,
+        autojunk=False
+    )
+
+    correspondencias = {}
+    total_encontrado = 0
+
+    for bloco in comparacao.get_matching_blocks():
+        for i in range(bloco.size):
+            indice_letra = bloco.a + i
+            indice_audio = bloco.b + i
+
+            correspondencias[indice_letra] = indice_audio
+            total_encontrado += 1
+
+    cobertura = total_encontrado / len(tokens_letra)
+
+    print(
+        f"🔎 Correspondência entre letra e áudio: "
+        f"{cobertura:.0%}"
+    )
+
+    if cobertura < 0.20:
+        raise RuntimeError(
+            "Poucas palavras da letra foram encontradas no áudio."
+        )
+
+    tempos_linhas = [None] * len(linhas_letra)
+
+    for indice_linha, inicio, fim in intervalos_linhas:
+        encontrados = [
+            correspondencias[i]
+            for i in range(inicio, fim)
+            if i in correspondencias
+        ]
+
+        if encontrados:
+            primeiro = min(encontrados)
+
+            tempos_linhas[indice_linha] = transcricao[primeiro]["t"]
+
+    conhecidas = [
+        i for i, tempo in enumerate(tempos_linhas)
+        if tempo is not None
+    ]
+
+    if not conhecidas:
+        raise RuntimeError(
+            "Não foi possível localizar as linhas da letra no áudio."
+        )
+
+    # Estimar linhas sem correspondência usando as vizinhas.
+
+    for i in range(len(tempos_linhas)):
+        if tempos_linhas[i] is not None:
+            continue
+
+        anteriores = [k for k in conhecidas if k < i]
+        posteriores = [k for k in conhecidas if k > i]
+
+        if anteriores and posteriores:
+            antes = anteriores[-1]
+            depois = posteriores[0]
+
+            fracao = (i - antes) / (depois - antes)
+
+            tempos_linhas[i] = (
+                tempos_linhas[antes]
+                + (tempos_linhas[depois] - tempos_linhas[antes])
+                * fracao
+            )
+
+        elif anteriores:
+            antes = anteriores[-1]
+            tempos_linhas[i] = (
+                tempos_linhas[antes] + 2.5 * (i - antes)
+            )
+
+        else:
+            depois = posteriores[0]
+            tempos_linhas[i] = max(
+                0,
+                tempos_linhas[depois] - 2.5 * (depois - i)
+            )
+
+    resultado = []
+
+    for i, linha in enumerate(linhas_letra):
+        inicio = tempos_linhas[i]
+
+        if i + 1 < len(tempos_linhas):
+            fim = tempos_linhas[i + 1]
+        else:
+            fim = transcricao[-1]["end"]
+
+        resultado.append({
+            "t": round(inicio, 2),
+            "end": round(max(inicio, fim), 2),
+            "text": linha
+        })
+
+    return resultado
     
 def transcrever_vocais(vocals: Path, modelo_whisper: str, idioma: str | None) -> list[dict]:
     try:
@@ -286,14 +506,54 @@ def gerar_letra(
         linhas, fonte = ler_lrc(lrc), "lrc"
 
     else:
-        # 2. Procurar letra sincronizada no LRCLIB
-        linhas = buscar_lrclib(original) if original is not None else None
+        resultado = (
+            buscar_lrclib(original)
+            if original is not None else None
+        )
 
-        if linhas:
+        if resultado and resultado["tipo"] == "sincronizada":
+            linhas = resultado["linhas"]
             fonte = "lrclib"
 
+        elif resultado and resultado["tipo"] == "simples":
+            vocals = pasta / "vocals.wav"
+
+            if not vocals.exists():
+                print("⚠️ vocals.wav não encontrado para sincronizar a letra.")
+                return
+
+            print("🎵 Sincronizando a letra do LRCLIB com o áudio...")
+
+            try:
+                tempos = transcrever_palavras(
+                    vocals,
+                    modelo_whisper,
+                    idioma
+                )
+
+                linhas = sincronizar_letra_simples(
+                    resultado["letra"],
+                    tempos
+                )
+
+                fonte = "lrclib"
+
+                print("✅ Letra original do LRCLIB sincronizada!")
+
+            except RuntimeError as e:
+                print(f"⚠️ Alinhamento palavra por palavra falhou: {e}")
+                print("🔄 Usando transcrição normal do Whisper...")
+
+                linhas = transcrever_vocais(
+                    vocals,
+                    modelo_whisper,
+                    idioma
+                )
+
+                fonte = "whisper"
+
         else:
-            # 3. Último recurso: Faster-Whisper
+            # 3. Último recurso: Whisper
             vocals = pasta / "vocals.wav"
 
             if not vocals.exists():
