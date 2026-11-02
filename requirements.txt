@@ -2,3 +2,5 @@ demucs
 numpy
 faster-whisper
 av<19
+mutagen
+requests

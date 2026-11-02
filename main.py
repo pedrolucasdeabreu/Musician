@@ -11,14 +11,13 @@ import threading
 import webbrowser
 import warnings
 import logging
+import requests
+from mutagen import File as MutagenFile
 from pathlib import Path
 
 TEMPLATE = Path(__file__).parent / "mixer_template.html"
 
 def remover_warnings():
-    import warnings
-    import logging
-
     # Ignorar warnings específicos
     warnings.filterwarnings(
         "ignore",
@@ -87,19 +86,161 @@ def separar(arquivo: Path, saida: Path, modelo: str) -> Path:
 # O resultado vai para <pasta da música>/letra.json, que o mixer lê sozinho.
 # ---------------------------------------------------------------------------
 
-def ler_lrc(caminho: Path) -> list[dict]:
-    """Lê um .lrc ([mm:ss.xx] texto) e devolve [{'t': segundos, 'text': ...}]."""
-    marca = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\]")
+# ---------------------------------------------------------------------------
+# LRCLIB + leitura de metadados
+# ---------------------------------------------------------------------------
+
+def parsear_lrc(conteudo: str) -> list[dict]:
+    marca = re.compile(r"\[(\d+):(\d+)(?:\.(\d+))?\]")
     linhas = []
-    for bruta in caminho.read_text(encoding="utf-8-sig").splitlines():
+
+    for bruta in conteudo.splitlines():
+        timestamps = marca.findall(bruta)
         texto = marca.sub("", bruta).strip()
-        if not texto:
+
+        if not texto or not timestamps:
             continue
-        for minutos, segundos in marca.findall(bruta):
-            linhas.append({"t": round(int(minutos) * 60 + float(segundos), 2), "text": texto})
-    linhas.sort(key=lambda l: l["t"])
+
+        for minutos, segundos, fracao in timestamps:
+            centesimos = float("0." + fracao) if fracao else 0
+
+            tempo = (
+                int(minutos) * 60
+                + int(segundos)
+                + centesimos
+            )
+
+            linhas.append({
+                "t": round(tempo, 2),
+                "text": texto
+            })
+
+    linhas.sort(key=lambda linha: linha["t"])
     return linhas
 
+
+def ler_lrc(caminho: Path) -> list[dict]:
+    """Lê um arquivo LRC local."""
+    conteudo = caminho.read_text(encoding="utf-8-sig")
+    return parsear_lrc(conteudo)
+
+
+def obter_metadados(arquivo: Path) -> dict | None:
+    """Obtém título, artista, álbum e duração usando Mutagen."""
+
+    try:
+        audio = MutagenFile(str(arquivo), easy=True)
+
+        if audio is None:
+            return None
+
+        def obter_tag(nome):
+            valor = audio.get(nome)
+            if isinstance(valor, list):
+                return str(valor[0]).strip() if valor else None
+            return str(valor).strip() if valor else None
+
+        titulo = obter_tag("title")
+        artista = obter_tag("artist")
+        album = obter_tag("album")
+
+        duracao = getattr(audio.info, "length", None)
+
+        if not titulo or not artista or not duracao:
+            print("⚠️ Metadados incompletos. Não foi possível pesquisar no LRCLIB.")
+            return None
+
+        return {
+            "titulo": titulo,
+            "artista": artista,
+            "album": album,
+            "duracao": round(duracao)
+        }
+
+    except Exception as e:
+        print(f"⚠️ Erro ao ler metadados: {e}")
+        return None
+
+
+def buscar_lrclib(arquivo: Path) -> list[dict] | None:
+    """Procura letras sincronizadas no LRCLIB."""
+
+    metadados = obter_metadados(arquivo)
+
+    if not metadados:
+        return None
+
+    print(
+        f"🔎 Procurando letra no LRCLIB: "
+        f"{metadados['titulo']} - {metadados['artista']}"
+    )
+
+    params = {
+        "track_name": metadados["titulo"],
+        "artist_name": metadados["artista"],
+        "duration": metadados["duracao"]
+    }
+
+    if metadados["album"]:
+        params["album_name"] = metadados["album"]
+
+    try:
+        resposta = requests.get(
+            "https://lrclib.net/api/get",
+            params=params,
+            headers={
+                "User-Agent": "Musician/1.0"
+            },
+            timeout=15
+        )
+
+        if resposta.status_code == 404:
+            print("⚠️ Música não encontrada no LRCLIB.")
+            return None
+
+        resposta.raise_for_status()
+
+        dados = resposta.json()
+
+        if dados.get("instrumental"):
+            print("⚠️ LRCLIB identificou a música como instrumental.")
+            return None
+
+        letra = dados.get("syncedLyrics")
+
+        if not letra:
+            if dados.get("plainLyrics"):
+                print("⚠️ Letra encontrada, mas sem sincronização temporal.")
+            else:
+                print("⚠️ LRCLIB não possui letra disponível.")
+            return None
+
+        linhas = parsear_lrc(letra)
+
+        if not linhas:
+            print("⚠️ A letra encontrada não possui timestamps válidos.")
+            return None
+
+        print(
+            f"✅ Letra encontrada no LRCLIB! "
+            f"{len(linhas)} linhas sincronizadas."
+        )
+
+        return linhas
+
+    except requests.exceptions.Timeout:
+        print("⚠️ Tempo limite excedido ao consultar LRCLIB.")
+        return None
+
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️ Erro ao consultar LRCLIB: {e}")
+        return None
+
+    except (ValueError, TypeError) as e:
+        print(f"⚠️ Resposta inválida do LRCLIB: {e}")
+        return None
+
+    
 def transcrever_vocais(vocals: Path, modelo_whisper: str, idioma: str | None) -> list[dict]:
     try:
         from faster_whisper import WhisperModel
@@ -125,29 +266,62 @@ def transcrever_vocais(vocals: Path, modelo_whisper: str, idioma: str | None) ->
     print()
     return linhas
 
-def gerar_letra(pasta: Path, original: Path | None, modelo_whisper: str, idioma: str | None) -> None:
-    # Procura um .lrc: ao lado do arquivo original ou dentro de 'output' (<nome>.lrc)
+def gerar_letra(
+    pasta: Path,
+    original: Path | None,
+    modelo_whisper: str,
+    idioma: str | None
+) -> None:
+
+    # 1. Procurar um LRC local
     candidatos = [pasta.parent / f"{pasta.name}.lrc"]
+
     if original is not None:
         candidatos.insert(0, original.with_suffix(".lrc"))
+
     lrc = next((c for c in candidatos if c.exists()), None)
 
     if lrc:
         print(f"📝 Usando a letra sincronizada de '{lrc.name}'")
         linhas, fonte = ler_lrc(lrc), "lrc"
+
     else:
-        vocals = pasta / "vocals.wav"
-        if not vocals.exists():
-            print("⚠️  vocals.wav não encontrado, não dá para gerar a letra.")
-            return
-        linhas, fonte = transcrever_vocais(vocals, modelo_whisper, idioma), "whisper"
+        # 2. Procurar letra sincronizada no LRCLIB
+        linhas = buscar_lrclib(original) if original is not None else None
+
+        if linhas:
+            fonte = "lrclib"
+
+        else:
+            # 3. Último recurso: Faster-Whisper
+            vocals = pasta / "vocals.wav"
+
+            if not vocals.exists():
+                print("⚠️ vocals.wav não encontrado, não dá para gerar a letra.")
+                return
+
+            linhas = transcrever_vocais(
+                vocals,
+                modelo_whisper,
+                idioma
+            )
+
+            fonte = "whisper"
 
     if not linhas:
-        print("⚠️  Nenhuma linha de letra foi encontrada.")
+        print("⚠️ Nenhuma linha de letra foi encontrada.")
         return
+
     (pasta / "letra.json").write_text(
-        json.dumps({"fonte": fonte, "linhas": linhas}, ensure_ascii=False), encoding="utf-8")
+        json.dumps(
+            {"fonte": fonte, "linhas": linhas},
+            ensure_ascii=False
+        ),
+        encoding="utf-8"
+    )
+
     print(f"✅ Letra salva: {len(linhas)} linhas (fonte: {fonte})")
+
 
 def gerar_mixer(pasta: Path) -> None:
     if not TEMPLATE.exists():
