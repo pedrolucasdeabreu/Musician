@@ -154,57 +154,116 @@ def registar_download(arquivo: Path, plataforma: str, identificador: str, metada
     })
     guardar_catalogo(catalogo)
 
-def extrair_metadados_youtube(info: dict) -> dict:
-    titulo_original = (
-        info.get("track")
-        or info.get("title")
-        or ""
-    ).strip()
+def limpar_titulo_youtube(texto: str) -> str:
+    if not texto:
+        return ""
 
+    texto = texto.strip()
+
+    # Remove indicações promocionais entre parênteses ou colchetes.
+    texto = re.sub(
+        r"\s*[\(\[][^)\]]*(?:"
+        r"official\s+(?:music\s+)?(?:video|audio)|"
+        r"music\s+video|"
+        r"lyric(?:s)?(?:\s+video)?|"
+        r"visuali[sz]er|"
+        r"\b(?:4k|1080p|720p|hd)\b"
+        r")[^)\]]*[\)\]]",
+        "",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    # Remove participações.
+    texto = re.sub(
+        r"\s+(?:ft\.?|feat\.?|featuring)\s+.*$",
+        "",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    # Normaliza espaços.
+    texto = re.sub(r"\s+", " ", texto)
+
+    return texto.strip(" \t-–—|:")
+
+def extrair_metadados_youtube(info: dict) -> dict:
+
+    # Obtém as duas versões do título.
+    titulo_video = limpar_titulo_youtube(
+        info.get("title") or ""
+    )
+
+    titulo_track = limpar_titulo_youtube(
+        info.get("track") or ""
+    )
+
+    # Primeiro tenta obter o artista dos metadados.
     artista = (
         info.get("artist")
         or info.get("album_artist")
-        or info.get("creator")
         or ""
     ).strip()
 
-    titulo = titulo_original
+    # Procura separadores entre artista e música.
+    separador = r"\s[-–—]\s"
 
-    # Tenta extrair artista e música de títulos como:
-    # Chris Brown - Party (Official Video) ft. Usher
-    if " - " in titulo_original:
-        partes = titulo_original.split(" - ", 1)
+    partes_video = re.split(
+        separador, titulo_video, maxsplit=1
+    )
 
-        if not artista:
-            artista = partes[0].strip()
+    partes_track = re.split(
+        separador, titulo_track, maxsplit=1
+    )
 
-        titulo = partes[1].strip()
+    # Se o artista não veio nos metadados,
+    # tenta identificá-lo pelo título do vídeo.
+    if not artista:
 
-    elif " – " in titulo_original:
-        partes = titulo_original.split(" – ", 1)
+        if len(partes_track) == 2:
+            artista = partes_track[0].strip()
 
-        if not artista:
-            artista = partes[0].strip()
+        elif len(partes_video) == 2:
+            artista = partes_video[0].strip()
 
-        titulo = partes[1].strip()
+    # Determina o nome da música.
+    if len(partes_track) == 2:
+        titulo = partes_track[1].strip()
 
-    # Remove indicações promocionais do título.
-    titulo = re.sub(
-        r"\s*[\(\[]\s*(official\s+)?"
-        r"(music\s+)?(video|audio|lyrics?|visualizer|hd)"
-        r"[^\)\]]*[\)\]]",
+    elif titulo_track:
+        titulo = titulo_track
+
+    elif len(partes_video) == 2:
+        titulo = partes_video[1].strip()
+
+    else:
+        titulo = titulo_video
+
+    # Se ainda não temos artista, tenta o creator.
+    if not artista:
+        artista = (
+            info.get("creator")
+            or ""
+        ).strip()
+
+    # Remove participações do nome do artista.
+    artista = re.sub(
+        r"\s+(?:ft\.?|feat\.?|featuring)\s+.*$",
         "",
-        titulo,
+        artista,
         flags=re.IGNORECASE
     ).strip()
 
-    # Remove participações do título.
-    titulo = re.sub(
-        r"\s+(ft\.?|feat\.?|featuring)\s+.*$",
-        "",
-        titulo,
-        flags=re.IGNORECASE
-    ).strip()
+    # Evita que o nome do artista fique repetido no título.
+    if artista:
+        titulo = re.sub(
+            rf"^{re.escape(artista)}\s*[-–—:]\s*",
+            "",
+            titulo,
+            flags=re.IGNORECASE
+        )
+
+    titulo = limpar_titulo_youtube(titulo)
 
     duracao = info.get("duration")
 
@@ -541,7 +600,9 @@ def obter_metadados(arquivo: Path) -> dict | None:
 
     return resultado
 
+
 def buscar_lrclib(arquivo: Path) -> dict | None:
+
     metadados = obter_metadados(arquivo)
 
     if not metadados:
@@ -551,72 +612,79 @@ def buscar_lrclib(arquivo: Path) -> dict | None:
         f"🔎 Procurando letra no LRCLIB: "
         f"{metadados['titulo']} - {metadados['artista']}"
     )
-    
+
     params = {
         "track_name": metadados["titulo"],
         "artist_name": metadados["artista"]
     }
 
-    if metadados["album"]:
+    if metadados.get("album"):
         params["album_name"] = metadados["album"]
+
+    # A duração ajuda o LRCLIB a encontrar a versão correta.
+    if metadados.get("duracao"):
+        params["duration"] = metadados["duracao"]
+
+    headers = {
+        "User-Agent": "Musician/1.0"
+    }
 
     try:
         resposta = requests.get(
             "https://lrclib.net/api/get",
             params=params,
-            headers={"User-Agent": "Musician/1.0"},
+            headers=headers,
             timeout=15
         )
 
         if resposta.status_code == 404:
-            print("⚠️ Música não encontrada no LRCLIB.")
+            print("⚠️ Correspondência exata não encontrada.")
+
+        elif resposta.status_code == 429:
+            print("⚠️ Limite de pedidos do LRCLIB atingido.")
             return None
 
-        resposta.raise_for_status()
-        dados = resposta.json()
+        else:
+            resposta.raise_for_status()
 
-        if dados.get("instrumental"):
-            print("⚠️ LRCLIB identificou a música como instrumental.")
-            return None
+            dados = resposta.json()
 
-        sincronizada = dados.get("syncedLyrics")
-
-        if sincronizada:
-            linhas = parsear_lrc(sincronizada)
-
-            if linhas:
+            if dados.get("instrumental"):
                 print(
-                    f"✅ Letra sincronizada encontrada no LRCLIB! "
-                    f"{len(linhas)} linhas."
+                    "⚠️ LRCLIB identificou a música como instrumental."
                 )
-                return {
-                    "tipo": "sincronizada",
-                    "linhas": linhas
-                }
+                return None
 
-        simples = dados.get("plainLyrics")
+            resultado = converter_resultado_lrclib(dados)
 
-        if simples:
-            print("✅ Letra encontrada no LRCLIB, sem timestamps.")
-            return {
-                "tipo": "simples",
-                "letra": simples
-            }
+            if resultado:
 
-        print("⚠️ LRCLIB não possui letra disponível.")
-        return None
+                print("✅ Correspondência exata encontrada!")
+
+                return resultado
+
+            print(
+                "⚠️ Correspondência exata encontrada, "
+                "mas sem letra utilizável."
+            )
 
     except requests.exceptions.Timeout:
-        print("⚠️ Tempo limite excedido ao consultar LRCLIB.")
-        return None
+        print("⚠️ Tempo limite excedido na pesquisa exata.")
 
     except requests.exceptions.RequestException as e:
-        print(f"⚠️ Erro ao consultar LRCLIB: {e}")
-        return None
+        print(f"⚠️ Erro na pesquisa exata do LRCLIB: {e}")
+
+        if getattr(e.response, "status_code", None) == 429:
+            return None
 
     except (ValueError, TypeError) as e:
         print(f"⚠️ Resposta inválida do LRCLIB: {e}")
-        return None
+
+    # Segunda tentativa: pesquisa aproximada.
+    print("\n🔄 Tentando encontrar uma correspondência alternativa...")
+
+    return buscar_lrclib_aproximado(metadados)
+
 
 def normalizar_palavra(texto: str) -> str:
     texto = texto.casefold()
@@ -624,6 +692,344 @@ def normalizar_palavra(texto: str) -> str:
     texto = texto.encode("ascii", "ignore").decode("ascii")
     return texto
 
+
+def normalizar_texto_lrclib(texto: str) -> str:
+    """Normaliza títulos e artistas para comparação aproximada."""
+
+    if not texto:
+        return ""
+
+    texto = str(texto).strip()
+
+    # Remove informações promocionais entre parênteses ou colchetes.
+    texto = re.sub(
+        r"\s*[\(\[][^)\]]*(?:"
+        r"official|music video|audio|lyrics?|"
+        r"visualizer|visualiser|hd|4k"
+        r")[^)\]]*[\)\]]",
+        " ",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    # Remove indicações promocionais que estejam fora dos parênteses.
+    texto = re.sub(
+        r"\s+(?:official\s+)?(?:music\s+)?"
+        r"(?:video|audio|lyrics?|visualizer|visualiser)\b.*$",
+        "",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    # Remove participações.
+    texto = re.sub(
+        r"\s+(?:ft\.?|feat\.?|featuring)\s+.*$",
+        "",
+        texto,
+        flags=re.IGNORECASE
+    )
+
+    # Remove acentos e normaliza maiúsculas/minúsculas.
+    texto = normalizar_palavra(texto)
+
+    # Remove pontuação e caracteres especiais.
+    texto = re.sub(r"[^a-z0-9]+", " ", texto)
+
+    return texto.strip()
+
+
+def similaridade_lrclib(texto_a: str, texto_b: str) -> float:
+    """Calcula a semelhança entre dois textos."""
+
+    a = normalizar_texto_lrclib(texto_a)
+    b = normalizar_texto_lrclib(texto_b)
+
+    if not a or not b:
+        return 0.0
+
+    if a == b:
+        return 1.0
+
+    # Comparação considerando a sequência completa.
+    semelhanca_sequencia = difflib.SequenceMatcher(
+        None,
+        a,
+        b,
+        autojunk=False
+    ).ratio()
+
+    # Comparação considerando as palavras em comum.
+    palavras_a = set(a.split())
+    palavras_b = set(b.split())
+
+    comuns = len(palavras_a & palavras_b)
+
+    semelhanca_palavras = (
+        2 * comuns / (len(palavras_a) + len(palavras_b))
+    )
+
+    return max(
+        semelhanca_sequencia,
+        semelhanca_palavras
+    )
+
+
+def pontuar_resultado_lrclib(
+    metadados: dict,
+    resultado: dict
+) -> tuple[float, float, float]:
+
+    titulo_original = metadados.get("titulo") or ""
+    artista_original = metadados.get("artista") or ""
+
+    titulo_encontrado = (
+        resultado.get("trackName")
+        or resultado.get("name")
+        or ""
+    )
+
+    artista_encontrado = resultado.get("artistName") or ""
+
+    # Sem título ou artista não há comparação suficientemente segura.
+    if not titulo_original or not artista_original:
+        return 0.0, 0.0, 0.0
+
+    semelhanca_titulo = similaridade_lrclib(
+        titulo_original,
+        titulo_encontrado
+    )
+
+    semelhanca_artista = similaridade_lrclib(
+        artista_original,
+        artista_encontrado
+    )
+
+    # A duração também ajuda a distinguir versões diferentes.
+    duracao_original = metadados.get("duracao")
+    duracao_encontrada = resultado.get("duration")
+
+    if duracao_original and duracao_encontrada:
+
+        diferenca = abs(
+            float(duracao_original) - float(duracao_encontrada)
+        )
+
+        if diferenca <= 2:
+            semelhanca_duracao = 1.0
+        elif diferenca <= 5:
+            semelhanca_duracao = 0.85
+        elif diferenca <= 10:
+            semelhanca_duracao = 0.65
+        elif diferenca <= 20:
+            semelhanca_duracao = 0.35
+        else:
+            semelhanca_duracao = 0.0
+
+        pontuacao = (
+            semelhanca_titulo * 0.60
+            + semelhanca_artista * 0.32
+            + semelhanca_duracao * 0.08
+        )
+
+    else:
+        pontuacao = (
+            semelhanca_titulo * 0.65
+            + semelhanca_artista * 0.35
+        )
+
+    return (
+        pontuacao,
+        semelhanca_titulo,
+        semelhanca_artista
+    )
+
+
+def converter_resultado_lrclib(dados: dict) -> dict | None:
+    """Converte uma resposta LRCLIB para o formato usado pelo MUSICIAN."""
+
+    if dados.get("instrumental"):
+        return None
+
+    sincronizada = dados.get("syncedLyrics")
+
+    if sincronizada:
+        linhas = parsear_lrc(sincronizada)
+
+        if linhas:
+            return {
+                "tipo": "sincronizada",
+                "linhas": linhas
+            }
+
+    simples = dados.get("plainLyrics")
+
+    if simples:
+        return {
+            "tipo": "simples",
+            "letra": simples
+        }
+
+    return None
+
+def buscar_lrclib_aproximado(metadados: dict) -> dict | None:
+    """Pesquisa letras no LRCLIB através de correspondência aproximada."""
+
+    titulo = metadados.get("titulo")
+    artista = metadados.get("artista")
+
+    print("🔄 Iniciando pesquisa aproximada no LRCLIB...")
+
+    headers = {
+        "User-Agent": "Musician/1.0"
+    }
+
+    # Primeiro pesquisa por título e artista.
+    # Se necessário, tenta uma pesquisa textual mais abrangente.
+    consultas = [
+        {
+            "descricao": "título e artista",
+            "params": {
+                "track_name": titulo,
+                "artist_name": artista
+            }
+        },
+        {
+            "descricao": "pesquisa ampla",
+            "params": {
+                "q": f"{titulo} {artista}"
+            }
+        }
+    ]
+
+    for consulta in consultas:
+
+        print(
+            f"🔎 Pesquisa aproximada por "
+            f"{consulta['descricao']}..."
+        )
+
+        try:
+            resposta = requests.get(
+                "https://lrclib.net/api/search",
+                params=consulta["params"],
+                headers=headers,
+                timeout=15
+            )
+
+            if resposta.status_code == 429:
+                print(
+                    "⚠️ LRCLIB limitou temporariamente "
+                    "o número de pedidos."
+                )
+                return None
+
+            resposta.raise_for_status()
+
+            resultados = resposta.json()
+
+            if not isinstance(resultados, list):
+                continue
+
+            if not resultados:
+                print("⚠️ Nenhum resultado nesta pesquisa.")
+                continue
+
+            melhor = None
+            melhor_pontuacao = 0.0
+            melhor_titulo = 0.0
+            melhor_artista = 0.0
+
+            for candidato in resultados:
+
+                # Ignora instrumentais e resultados sem letra.
+                if candidato.get("instrumental"):
+                    continue
+
+                if not (
+                    candidato.get("syncedLyrics")
+                    or candidato.get("plainLyrics")
+                ):
+                    continue
+
+                pontuacao, titulo_score, artista_score = (
+                    pontuar_resultado_lrclib(
+                        metadados,
+                        candidato
+                    )
+                )
+
+                if pontuacao > melhor_pontuacao:
+
+                    melhor = candidato
+                    melhor_pontuacao = pontuacao
+                    melhor_titulo = titulo_score
+                    melhor_artista = artista_score
+
+            if melhor is None:
+                continue
+
+            # Exige uma correspondência mínima para evitar
+            # escolher letras de músicas diferentes.
+            corresponde = (
+                melhor_titulo >= 0.72
+                and melhor_artista >= 0.65
+                and melhor_pontuacao >= 0.80
+            )
+
+            if corresponde:
+
+                print(
+                    "\n✅ Correspondência aproximada encontrada!"
+                )
+
+                print(
+                    f"   Música: {melhor.get('trackName')}"
+                )
+
+                print(
+                    f"   Artista: {melhor.get('artistName')}"
+                )
+
+                print(
+                    f"   Semelhança do título: "
+                    f"{melhor_titulo:.0%}"
+                )
+
+                print(
+                    f"   Semelhança do artista: "
+                    f"{melhor_artista:.0%}"
+                )
+
+                print(
+                    f"   Pontuação total: "
+                    f"{melhor_pontuacao:.0%}"
+                )
+
+                return converter_resultado_lrclib(melhor)
+
+            print(
+                f"⚠️ Melhor resultado não suficientemente "
+                f"semelhante ({melhor_pontuacao:.0%})."
+            )
+
+        except requests.exceptions.Timeout:
+            print("⚠️ Tempo limite na pesquisa aproximada.")
+
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️ Erro na pesquisa aproximada: {e}")
+
+            if getattr(e.response, "status_code", None) == 429:
+                return None
+
+        except (ValueError, TypeError) as e:
+            print(f"⚠️ Resposta inválida do LRCLIB: {e}")
+
+    print(
+        "❌ Não foi encontrada uma correspondência "
+        "aproximada suficientemente confiável."
+    )
+
+    return None
 
 def transcrever_palavras(
     vocals: Path,
