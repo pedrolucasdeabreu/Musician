@@ -1,2 +1,4 @@
 .venv/
 output/
+downloads/
+catalogo_downloads.json

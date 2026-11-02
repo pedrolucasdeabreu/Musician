@@ -14,10 +14,371 @@ import webbrowser
 import warnings
 import logging
 import requests
+import os
+import imageio_ffmpeg
+from faster_whisper import WhisperModel
+from urllib.parse import urlparse, parse_qs
+from yt_dlp import YoutubeDL
 from mutagen import File as MutagenFile
 from pathlib import Path
 
 TEMPLATE = Path(__file__).parent / "mixer_template.html"
+
+# ---------------------------------------------------------------------------
+# Downloads, FFmpeg local e catálogo de músicas
+# ---------------------------------------------------------------------------
+
+BASE_DIR = Path(__file__).resolve().parent
+DOWNLOADS_DIR = BASE_DIR / "downloads"
+CATALOGO_FILE = BASE_DIR / "catalogo_downloads.json"
+
+def preparar_ambiente_audio() -> str:
+    try:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as e:
+        raise RuntimeError(f"Não foi possível localizar o FFmpeg: {e}")
+
+    pasta_ffmpeg = str(Path(ffmpeg).resolve().parent)
+    os.environ["PATH"] = pasta_ffmpeg + os.pathsep + os.environ.get("PATH", "")
+    os.environ["IMAGEIO_FFMPEG_EXE"] = ffmpeg
+
+    return ffmpeg
+
+def carregar_catalogo() -> dict:
+    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not CATALOGO_FILE.exists():
+        return {"musicas": []}
+
+    try:
+        dados = json.loads(
+            CATALOGO_FILE.read_text(encoding="utf-8")
+        )
+
+        if not isinstance(dados.get("musicas"), list):
+            return {"musicas": []}
+
+        return dados
+
+    except (json.JSONDecodeError, OSError):
+        print("⚠️ Catálogo inválido. Será criado novamente.")
+        return {"musicas": []}
+
+def guardar_catalogo(catalogo: dict) -> None:
+    CATALOGO_FILE.write_text(
+        json.dumps(catalogo, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+def identificar_link(url: str) -> tuple[str, str]:
+    try:
+        partes = urlparse(url.strip())
+        host = (partes.hostname or "").lower()
+
+        if host in ("youtube.com", "www.youtube.com", "m.youtube.com"):
+            video_id = parse_qs(partes.query).get("v", [None])[0]
+
+            if not video_id and partes.path.startswith("/shorts/"):
+                video_id = partes.path.split("/")[2]
+
+            if not video_id and partes.path.startswith("/live/"):
+                video_id = partes.path.split("/")[2]
+
+            if video_id:
+                return "youtube", video_id
+
+        elif host in ("youtu.be", "www.youtu.be"):
+            video_id = partes.path.strip("/").split("/")[0]
+
+            if video_id:
+                return "youtube", video_id
+
+        elif host in ("open.spotify.com", "www.open.spotify.com"):
+            segmentos = partes.path.strip("/").split("/")
+
+            if len(segmentos) >= 2 and segmentos[0] == "track":
+                return "spotify", segmentos[1]
+    except Exception:
+        pass
+
+    raise ValueError(
+        "Link inválido. Envia um link de uma música individual "
+        "do YouTube ou Spotify."
+    )
+
+def procurar_download_existente(plataforma: str, identificador: str) -> Path | None:
+    catalogo = carregar_catalogo()
+
+    for musica in catalogo["musicas"]:
+        if (
+            musica.get("plataforma") == plataforma
+            and musica.get("id") == identificador
+        ):
+            caminho = DOWNLOADS_DIR / musica.get("ficheiro", "")
+
+            if caminho.is_file():
+                print(f"♻️ Música já existe: {musica.get('titulo', caminho.name)}")
+                print("📂 A reutilizar o áudio guardado em downloads.")
+                return caminho
+
+            print("⚠️ Entrada encontrada no catálogo, mas o áudio não existe.")
+            return None
+    return None
+
+
+def registar_download(arquivo: Path, plataforma: str, identificador: str, metadados_extra: dict | None = None) -> None:
+    catalogo = carregar_catalogo()
+    metadados = obter_metadados(arquivo) or {}
+
+    if metadados_extra:
+        for chave, valor in metadados_extra.items():
+            if valor:
+                metadados[chave] = valor
+
+    catalogo["musicas"] = [
+        m for m in catalogo["musicas"]
+        if not (
+            m.get("plataforma") == plataforma
+            and m.get("id") == identificador
+        )
+    ]
+
+    catalogo["musicas"].append({
+        "plataforma": plataforma,
+        "id": identificador,
+        "titulo": metadados.get("titulo") or arquivo.stem,
+        "artista": metadados.get("artista"),
+        "album": metadados.get("album"),
+        "duracao": metadados.get("duracao"),
+        "ficheiro": arquivo.name
+    })
+    guardar_catalogo(catalogo)
+
+def extrair_metadados_youtube(info: dict) -> dict:
+    titulo_original = (
+        info.get("track")
+        or info.get("title")
+        or ""
+    ).strip()
+
+    artista = (
+        info.get("artist")
+        or info.get("album_artist")
+        or info.get("creator")
+        or ""
+    ).strip()
+
+    titulo = titulo_original
+
+    # Tenta extrair artista e música de títulos como:
+    # Chris Brown - Party (Official Video) ft. Usher
+    if " - " in titulo_original:
+        partes = titulo_original.split(" - ", 1)
+
+        if not artista:
+            artista = partes[0].strip()
+
+        titulo = partes[1].strip()
+
+    elif " – " in titulo_original:
+        partes = titulo_original.split(" – ", 1)
+
+        if not artista:
+            artista = partes[0].strip()
+
+        titulo = partes[1].strip()
+
+    # Remove indicações promocionais do título.
+    titulo = re.sub(
+        r"\s*[\(\[]\s*(official\s+)?"
+        r"(music\s+)?(video|audio|lyrics?|visualizer|hd)"
+        r"[^\)\]]*[\)\]]",
+        "",
+        titulo,
+        flags=re.IGNORECASE
+    ).strip()
+
+    # Remove participações do título.
+    titulo = re.sub(
+        r"\s+(ft\.?|feat\.?|featuring)\s+.*$",
+        "",
+        titulo,
+        flags=re.IGNORECASE
+    ).strip()
+
+    duracao = info.get("duration")
+
+    return {
+        "titulo": titulo or None,
+        "artista": artista or None,
+        "album": info.get("album"),
+        "duracao": round(duracao) if duracao else None
+    }
+
+def descarregar_youtube(url: str, ffmpeg: str) -> tuple[Path, dict]:
+    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+    opcoes = {
+        "format": "bestaudio/best",
+        "outtmpl": str(
+            DOWNLOADS_DIR / "%(title).150B.%(ext)s"
+        ),
+        "noplaylist": True,
+        "ffmpeg_location": ffmpeg,
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192"
+        }],
+        "quiet": True,
+        "no_warnings": True
+    }
+
+    print("🎵 A descarregar áudio do YouTube...")
+
+    with YoutubeDL(opcoes) as ydl:
+        info = ydl.extract_info(url, download=True)
+
+        caminho = Path(
+            ydl.prepare_filename(info)
+        ).with_suffix(".mp3")
+
+    if not caminho.is_file():
+        raise RuntimeError(
+            "O download do YouTube terminou, mas o MP3 não foi encontrado."
+        )
+
+    metadados = extrair_metadados_youtube(info)
+    return caminho, metadados
+
+def descarregar_spotify(url: str, ffmpeg: str) -> Path:
+    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+    pasta_temp = Path(tempfile.mkdtemp(
+        prefix=".spotdl_"
+    ))
+
+    try:
+        cmd = [
+            sys.executable,
+            "-m", "spotdl",
+            "download",
+            url,
+            "--format", "mp3",
+            "--ffmpeg", ffmpeg,
+            "--output", "{artists} - {title}.{output-ext}",
+            "--overwrite", "force"
+        ]
+
+        print("🎵 A procurar e descarregar áudio através do Spotify...")
+
+        resultado = subprocess.run(
+            cmd,
+            cwd=str(pasta_temp)
+        )
+
+        if resultado.returncode != 0:
+            raise RuntimeError(
+                "O spotDL não conseguiu descarregar esta música."
+            )
+
+        ficheiros = [
+            p for p in pasta_temp.rglob("*.mp3")
+            if p.is_file()
+        ]
+
+        if not ficheiros:
+            raise RuntimeError(
+                "O spotDL terminou, mas não encontrei o MP3."
+            )
+
+        origem = ficheiros[0]
+        destino = DOWNLOADS_DIR / origem.name
+
+        contador = 2
+
+        while destino.exists():
+            destino = DOWNLOADS_DIR / (
+                f"{origem.stem} ({contador}).mp3"
+            )
+            contador += 1
+
+        shutil.move(str(origem), str(destino))
+
+        print(f"✅ Áudio descarregado: {destino.name}")
+
+        return destino
+
+    finally:
+        shutil.rmtree(pasta_temp, ignore_errors=True)
+
+def obter_audio_por_link(url: str, ffmpeg: str) -> Path:
+    plataforma, identificador = identificar_link(url)
+
+    # 1. Verifica se o áudio já existe.
+    existente = procurar_download_existente(
+        plataforma,
+        identificador
+    )
+
+    if existente:
+        return existente
+
+    # 2. Descarrega o áudio e obtém os metadados.
+    if plataforma == "youtube":
+        arquivo, metadados = descarregar_youtube(url, ffmpeg)
+
+    else:
+        arquivo = descarregar_spotify(url, ffmpeg)
+        metadados = obter_metadados(arquivo) or {}
+
+    # 3. Regista o áudio e os metadados.
+    registar_download(
+        arquivo,
+        plataforma,
+        identificador,
+        metadados
+    )
+    print(f"✅ Áudio guardado em: {arquivo}")
+    return arquivo
+
+def escolher_audio() -> Path:
+    print("\n🎵 MUSICIAN\n")
+    print("Como queres adicionar a música?\n")
+    print("[1] Ficheiro de áudio")
+    print("[2] Link do YouTube")
+    print("[3] Link do Spotify\n")
+
+    opcao = input("Opção: ").strip()
+
+    if opcao == "1":
+        caminho = input("\nIndica o caminho do ficheiro de áudio:\n> ").strip()
+        caminho = caminho.strip('"').strip("'")
+
+        arquivo = Path(caminho).expanduser()
+
+        if not arquivo.is_file():
+            raise FileNotFoundError(f"Ficheiro não encontrado: {arquivo}")
+
+        return arquivo.resolve()
+
+    if opcao in ("2", "3"):
+        url = input("\nCola o link da música:\n> ").strip()
+
+        plataforma, _ = identificar_link(url)
+
+        if opcao == "2" and plataforma != "youtube":
+            raise ValueError("Escolheste YouTube, mas o link não é do YouTube.")
+
+        if opcao == "3" and plataforma != "spotify":
+            raise ValueError("Escolheste Spotify, mas o link não é do Spotify.")
+
+        ffmpeg = preparar_ambiente_audio()
+        print("\n🔎 A identificar música...")
+
+        return obter_audio_por_link(url, ffmpeg)
+
+    raise ValueError("Opção inválida. Escolhe 1, 2 ou 3.")
 
 def remover_warnings():
     # Ignorar warnings específicos
@@ -41,11 +402,6 @@ def remover_warnings():
     logging.getLogger("demucs").setLevel(logging.ERROR)
 
 def separar(arquivo: Path, saida: Path, modelo: str) -> Path:
-    try:
-        import demucs  # noqa: F401
-    except ImportError:
-        sys.exit("Demucs não encontrado. Instale com:  pip install -r requirements.txt")
-
     # Cria a pasta 'output' (ou a que foi indicada) se ainda não existir
     saida.mkdir(parents=True, exist_ok=True)
 
@@ -64,7 +420,10 @@ def separar(arquivo: Path, saida: Path, modelo: str) -> Path:
     try:
         cmd = [sys.executable, "-m", "demucs", "-n", modelo, "-o", tmp, str(arquivo)]
         if subprocess.run(cmd).returncode != 0:
-            sys.exit("Falha no Demucs. Veja o erro acima (ffmpeg instalado?).")
+            sys.exit(
+                "Falha no Demucs. Verifica se as dependências de áudio "
+                "estão corretamente instaladas no ambiente Python."
+            )
 
         gerada = Path(tmp) / modelo / arquivo.stem
         if not gerada.exists():
@@ -120,49 +479,67 @@ def parsear_lrc(conteudo: str) -> list[dict]:
     linhas.sort(key=lambda linha: linha["t"])
     return linhas
 
-
 def ler_lrc(caminho: Path) -> list[dict]:
     """Lê um arquivo LRC local."""
     conteudo = caminho.read_text(encoding="utf-8-sig")
     return parsear_lrc(conteudo)
 
-
 def obter_metadados(arquivo: Path) -> dict | None:
-    """Obtém título, artista, álbum e duração usando Mutagen."""
+    resultado = {}
 
     try:
         audio = MutagenFile(str(arquivo), easy=True)
 
-        if audio is None:
-            return None
+        if audio is not None:
 
-        def obter_tag(nome):
-            valor = audio.get(nome)
-            if isinstance(valor, list):
-                return str(valor[0]).strip() if valor else None
-            return str(valor).strip() if valor else None
+            def obter_tag(nome):
+                valor = audio.get(nome)
 
-        titulo = obter_tag("title")
-        artista = obter_tag("artist")
-        album = obter_tag("album")
+                if isinstance(valor, list):
+                    return str(valor[0]).strip() if valor else None
 
-        duracao = getattr(audio.info, "length", None)
+                return str(valor).strip() if valor else None
 
-        if not titulo or not artista or not duracao:
-            print("⚠️ Metadados incompletos. Não foi possível pesquisar no LRCLIB.")
-            return None
-
-        return {
-            "titulo": titulo,
-            "artista": artista,
-            "album": album,
-            "duracao": round(duracao)
-        }
+            resultado = {
+                "titulo": obter_tag("title"),
+                "artista": obter_tag("artist"),
+                "album": obter_tag("album"),
+                "duracao": (
+                    round(audio.info.length)
+                    if getattr(audio, "info", None)
+                    and getattr(audio.info, "length", None)
+                    else None
+                )
+            }
 
     except Exception as e:
-        print(f"⚠️ Erro ao ler metadados: {e}")
+        print(f"⚠️ Erro ao ler metadados do áudio: {e}")
+
+    # Se faltarem dados, procura no catálogo.
+    if (
+        not resultado.get("titulo")
+        or not resultado.get("artista")
+        or not resultado.get("duracao")
+    ):
+        catalogo = carregar_catalogo()
+
+        for musica in catalogo["musicas"]:
+            if musica.get("ficheiro") == arquivo.name:
+
+                for chave in ("titulo", "artista", "album", "duracao"):
+                    if not resultado.get(chave):
+                        resultado[chave] = musica.get(chave)
+
+                break
+
+    if (
+        not resultado.get("titulo")
+        or not resultado.get("artista")
+        or not resultado.get("duracao")
+    ):
         return None
 
+    return resultado
 
 def buscar_lrclib(arquivo: Path) -> dict | None:
     metadados = obter_metadados(arquivo)
@@ -174,11 +551,10 @@ def buscar_lrclib(arquivo: Path) -> dict | None:
         f"🔎 Procurando letra no LRCLIB: "
         f"{metadados['titulo']} - {metadados['artista']}"
     )
-
+    
     params = {
         "track_name": metadados["titulo"],
-        "artist_name": metadados["artista"],
-        "duration": metadados["duracao"]
+        "artist_name": metadados["artista"]
     }
 
     if metadados["album"]:
@@ -254,14 +630,6 @@ def transcrever_palavras(
     modelo_whisper: str,
     idioma: str | None
 ) -> list[dict]:
-
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError:
-        raise RuntimeError(
-            "faster-whisper não encontrado. Instale com: "
-            "python -m pip install faster-whisper"
-        )
 
     print(
         f"📝 Transcrevendo palavras com o Whisper "
@@ -462,11 +830,6 @@ def sincronizar_letra_simples(
     return resultado
     
 def transcrever_vocais(vocals: Path, modelo_whisper: str, idioma: str | None) -> list[dict]:
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError:
-        raise RuntimeError("faster-whisper não encontrado. Instale com:  pip install faster-whisper")
-
     print(f"📝 Transcrevendo a voz com o Whisper '{modelo_whisper}'...")
     modelo = WhisperModel(modelo_whisper, device="cpu", compute_type="int8")
     segmentos, info = modelo.transcribe(
@@ -609,58 +972,106 @@ def servir(pasta: Path) -> None:
             print("\nEncerrado.")
 
 def main():
-    ap = argparse.ArgumentParser(description="Musician - Separador de Instrumentos/Vocais.")
-    ap.add_argument("arquivo", type=Path, nargs="?", help="mp3/wav/flac/m4a...")
-    ap.add_argument("--saida", type=Path, default=Path("output"), help="pasta de saída")
+    ap = argparse.ArgumentParser(
+        description="Musician - Separador de Instrumentos/Vocais."
+    )
+
+    ap.add_argument(
+        "arquivo",
+        type=Path,
+        nargs="?",
+        help="ficheiro de áudio local (opcional)"
+    )
+
+    ap.add_argument("--saida", type=Path, default=Path("output"),
+                    help="pasta de saída")
+
     ap.add_argument("--abrir", metavar="NOME",
-                    help="abre o mixer de uma música já processada (nome da pasta em output)")
+                    help="abre o mixer de uma música já processada")
+
     ap.add_argument("--4stems", dest="quatro", action="store_true",
-                    help="usa 4 stems (voz, bateria, baixo, outros) em vez de 6")
-    ap.add_argument("--sem-mixer", action="store_true", help="só separa, não abre o mixer")
+                    help="usa 4 stems em vez de 6")
+
+    ap.add_argument("--sem-mixer", action="store_true",
+                    help="só separa, não abre o mixer")
+
     ap.add_argument("--letra", action="store_true",
-                    help="com --abrir: (re)gera a letra sincronizada de uma música já processada")
-    ap.add_argument("--sem-letra", action="store_true", help="não gera a letra sincronizada")
+                    help="com --abrir: regenera a letra")
+
+    ap.add_argument("--sem-letra", action="store_true",
+                    help="não gera a letra sincronizada")
+
     ap.add_argument("--modelo-letra", default="large-v3",
-                    help="modelo do Whisper: tiny, base, small, medium, large-v3 (padrão: large-v3)")
+                    help="modelo do Whisper")
+
     ap.add_argument("--idioma", default=None,
-                    help="idioma da letra, ex.: pt, en, es (padrão: detectar sozinho)")
+                    help="idioma da letra, ex.: pt, en, es")
+
     args = ap.parse_args()
 
+    # Abrir um mixer já existente.
     if args.abrir:
         pasta = args.saida / args.abrir
+
         if not pasta.exists():
             sys.exit(f"Pasta não encontrada: {pasta}")
+
         if args.letra:
             try:
-                gerar_letra(pasta, None, args.modelo_letra, args.idioma)
+                gerar_letra(
+                    pasta, None,
+                    args.modelo_letra,
+                    args.idioma
+                )
             except Exception as e:
-                print(f"⚠️  Não foi possível gerar a letra: {e}")
-        gerar_mixer(pasta)   # regenera o HTML para pegar a versão mais recente
+                print(f"⚠️ Não foi possível gerar a letra: {e}")
+
+        gerar_mixer(pasta)
         servir(pasta)
         return
 
-    if args.arquivo is None:
-        ap.error("informe o arquivo da música ou use --abrir NOME")
+    try:
+        # Se não foi indicado um ficheiro pela linha de comandos,
+        # apresenta o menu interativo.
+        if args.arquivo is None:
+            arquivo = escolher_audio()
+        else:
+            arquivo = args.arquivo.expanduser().resolve()
 
-    if not args.arquivo.exists():
-        sys.exit(f"Arquivo não encontrado: {args.arquivo}")
+            if not arquivo.is_file():
+                sys.exit(f"Arquivo não encontrado: {arquivo}")
 
-    modelo = "htdemucs" if args.quatro else "htdemucs_6s"
-    pasta = separar(args.arquivo, args.saida, modelo)
-    print(f"\n✅ Stems salvos em: {pasta.resolve()}")
-    for w in sorted(pasta.glob("*.wav")):
-        print("   -", w.name)
+        modelo = "htdemucs" if args.quatro else "htdemucs_6s"
 
-    if not args.sem_letra:
-        print()
-        try:
-            gerar_letra(pasta, args.arquivo, args.modelo_letra, args.idioma)
-        except Exception as e:   # a letra é um extra: se falhar, o mixer abre normalmente
-            print(f"⚠️  Não foi possível gerar a letra: {e}")
+        print("\n🎚️ A separar instrumentos...")
 
-    if not args.sem_mixer:
-        gerar_mixer(pasta)
-        servir(pasta)
+        pasta = separar(arquivo, args.saida, modelo)
+
+        print(f"\n✅ Stems salvos em: {pasta.resolve()}")
+
+        for w in sorted(pasta.glob("*.wav")):
+            print("   -", w.name)
+
+        if not args.sem_letra:
+            print("\n🎤 A procurar e sincronizar letra...")
+
+            try:
+                gerar_letra(
+                    pasta,
+                    arquivo,
+                    args.modelo_letra,
+                    args.idioma
+                )
+            except Exception as e:
+                print(f"⚠️ Não foi possível gerar a letra: {e}")
+
+        if not args.sem_mixer:
+            gerar_mixer(pasta)
+            print("\n✅ Mixer pronto!")
+            servir(pasta)
+
+    except (ValueError, FileNotFoundError, RuntimeError) as e:
+        sys.exit(f"\n❌ {e}")
 
 if __name__ == "__main__":
     remover_warnings()
