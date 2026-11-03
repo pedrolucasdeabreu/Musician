@@ -1,6 +1,6 @@
 # DESIGN.md — Sistema visual do Musician
 
-> Documento de direção visual inicial. Os componentes concretos serão implementados nas apps web e mobile; estes tokens são a referência para ambas.
+> Sistema visual aplicado no MVP web e mobile. Os tokens são compartilhados; cada plataforma adapta seus padrões de navegação e interação.
 
 ## 1. Princípios
 
@@ -70,14 +70,20 @@ Não usar apenas a cor para comunicar estado; combinar com texto/ícone.
 
 ## 7. Componentes
 
-- `TrackRow` / `TrackCard`: artwork, título, artista, origem, favorito e menu.
-- `PlaylistCard`: capa/colagem, nome, contagem e ações.
-- `MediaEmbed`: player de YouTube/Spotify com proporção e fallback.
-- `SyncedLyrics`: letra com linha ativa e scroll automático controlado.
-- `PlaybackBar`: controlos, progresso e estado de reprodução.
-- `Sidebar` / `BottomNavigation`: navegação por breakpoint/plataforma.
-- `AuthForm`: login, registo, Google OAuth e feedback de validação.
+- `TrackRow` / `TrackCard`: artwork, título, artista, origem, favorito e ações.
+- `Playlist`: criação, navegação e adição de músicas.
+- `MediaEmbed`: iframes oficiais de YouTube/Spotify; YouTube usa a IFrame Player API para posição de reprodução.
+- `LyricsPanel`: texto somente de fonte licenciada; destaca linha com timestamp quando o player oferece posição.
+- `Sidebar` / `BottomNavigation`: sidebar desktop e navegação mobile compacta.
+- `AuthForm`: login, registro, Google OAuth e feedback de validação.
 - `EmptyState`, `ErrorState`, `Skeleton`: estados de conteúdo.
+
+### Implementação atual
+
+- Web usa Next.js, HeroUI v3 e CSS responsivo; desktop dispõe player/letra em colunas e mobile em fluxo vertical.
+- Mobile usa React, Capacitor e Konsta UI; player aparece acima da letra.
+- Biblioteca, favoritos e playlists são persistidos no Supabase sob RLS.
+- O MVP não implementa uma barra persistente de reprodução; o próprio embed mantém os controles oficiais.
 
 ## 8. Comportamento da letra
 

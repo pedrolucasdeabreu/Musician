@@ -1,15 +1,15 @@
 # Musician
 
-Aplicação para organizar músicas, acompanhar letras sincronizadas e, quando o utilizador fornece áudio que tem direito a processar, separar instrumentos e voz.
+Aplicação para organizar músicas e acompanhar letras licenciadas ao lado de players oficiais. O processador Python legado é separado do fluxo web/mobile.
 
-> **Estado:** fundação do projeto em desenvolvimento. O código Python original foi preservado como motor CLI. Web, mobile, autenticação e execução remota de tarefas ainda não estão implementados.
+> **Estado:** MVP web e shell mobile implementados. A aplicação suporta autenticação Supabase, biblioteca pessoal, playlists, favoritos e embeds oficiais; a produção ainda depende das credenciais dos serviços e da configuração das lojas.
 
 ## Objetivos de produto
 
 - Incorporar players oficiais do YouTube e Spotify para reprodução, sem descarregar automaticamente a música.
 - Mostrar vídeo e letra sincronizada lado a lado na web e em coluna no mobile.
 - Permitir contas, favoritos e playlists sincronizados entre dispositivos.
-- Permitir upload de áudio autorizado para processamento por Demucs/Whisper.
+- Manter o processamento Python legado separado da biblioteca web/mobile; a app não recebe nem baixa áudio de embeds.
 - Disponibilizar web na Vercel e backend/dados no Supabase.
 - Manter licença GPL-3.0-only para o código do projeto, sujeita à auditoria de compatibilidade das dependências.
 
@@ -17,8 +17,8 @@ Aplicação para organizar músicas, acompanhar letras sincronizadas e, quando o
 
 ```text
 apps/
-  web/                  # Next.js + HeroUI (a implementar)
-  mobile/               # React + Capacitor + Konsta UI (a implementar)
+  web/                  # Next.js + HeroUI, pronta para deploy na Vercel
+  mobile/               # React + Capacitor + Konsta UI
 services/
   processor/            # Motor Python e funções de domínio
 supabase/
@@ -33,7 +33,7 @@ supabase/
 - Python 3.14 (série suportada: `>=3.14,<3.15`). O ambiente local indicado em `.python-version` é 3.14.4.
 - O CI usa Python 3.14.10, uma atualização de manutenção da mesma série com correções de segurança.
 - Todas as dependências do projeto (processamento, testes e lint) são instaladas através do `requirements.txt` na raiz. O ficheiro `services/processor/requirements.txt` mantém a lista modular das dependências específicas do processador.
-- Para executar o mixer, o ficheiro `services/processor/mixer_template.html` também é necessário. Esse ficheiro não estava incluído no material inicial recebido e, por isso, não foi inventado nesta migração.
+- O motor CLI legado ainda existe, mas não integra a aplicação web/mobile e não deve ser usado para obter áudio de embeds.
 
 ## Executar o processador (modo CLI legado)
 
@@ -55,26 +55,53 @@ ruff check .
 python -m compileall -q .
 ```
 
-## Produção: Supabase e Vercel
+## Web: Vercel e Supabase
 
-O projeto conecta-se exclusivamente aos serviços hospedados; não mantém uma stack Supabase local.
+O projeto conecta-se exclusivamente aos serviços hospedados; não mantém uma stack Supabase local. A Vercel deve usar `apps/web` como **Root Directory**, com os comandos padrão de instalação e build do Next.js.
 
 1. Cria o projeto no Supabase Dashboard.
-2. No **SQL Editor**, aplica uma única vez o conteúdo da migration em `supabase/migrations/`. Faz backup e confirma que estás no projeto de produção antes de executar SQL.
-3. Em **Authentication > URL Configuration**, define a URL de produção da aplicação como **Site URL** e adiciona os URLs de redirect usados pela aplicação.
-4. Em **Authentication > Sign In / Providers**, ativa os métodos de autenticação pretendidos. Para Google, configura as credenciais no Dashboard e usa o callback apresentado pelo Supabase: `https://<PROJECT_REF>.supabase.co/auth/v1/callback`.
-5. Na Vercel, configura as variáveis de ambiente de produção indicadas em `.env.example`, usando a URL e a chave pública do projeto Supabase. Publica a aplicação pela integração da Vercel.
+2. No **SQL Editor**, aplica a migration em `supabase/migrations/` uma única vez. Confirma o projeto e faz backup antes de executar SQL em produção.
+3. Em **Authentication > URL Configuration**, define a URL de produção como **Site URL** e adiciona `https://SEU_DOMINIO/auth/callback` aos redirect URLs.
+4. Em **Authentication > Sign In / Providers**, ativa Email e Google. Configura OAuth no Google Cloud com callback `https://<PROJECT_REF>.supabase.co/auth/v1/callback`.
+5. Na Vercel, configura `NEXT_PUBLIC_SUPABASE_URL` e `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`. Se houver um provedor de letras licenciado, configura também `LICENSED_LYRICS_API_URL` e `LICENSED_LYRICS_API_KEY` como variáveis server-side.
+6. Liga o repositório à Vercel. Cada push em `main` publica a versão web automaticamente.
 
-A migration cria as tabelas, políticas RLS e buckets privados `audio-inputs` e `audio-outputs`. O teste pgTAP em `supabase/tests/rls.test.sql` contém utilizadores e dados de teste; executa-o apenas numa base isolada, nunca na produção. A chave `SUPABASE_SERVICE_ROLE_KEY` é exclusivamente server-side/worker-side e nunca deve ser exposta ao browser, ao bundle mobile ou ao repositório.
+A migration cria as tabelas de perfil, músicas, playlists e favoritos e aplica RLS. O teste pgTAP em `supabase/tests/rls.test.sql` contém dados de teste; executa-o apenas numa base descartável, nunca em produção. A aplicação não necessita da chave `service_role`.
+
+### Letras e áudio
+
+- O app obtém título, autor e imagem por oEmbed do YouTube ou Spotify e apresenta o iframe/player oficial.
+- O áudio dos embeds não é descarregado nem armazenado.
+- Letras são opcionais e só são consultadas em `LICENSED_LYRICS_API_URL` com credencial server-side para um provedor que autorize expressamente a exibição no app. O contrato esperado é `GET ?title=...&artist=...`, resposta `{ "lyrics": [{ "t": 12.5, "text": "..." }], "source": "..." }` e `404` quando não houver letra. Sem provedor, a interface informa que a letra está indisponível.
+- O player do YouTube permite destacar a linha pela posição de reprodução quando a letra contém timestamps. O embed do Spotify não fornece essa posição à aplicação; nele, a letra é apresentada sem sincronização.
+- O endpoint de identificação requer uma sessão autenticada e não usa URL fornecida pelo usuário para fazer fetch arbitrário: só aceita IDs válidos dos hosts oficiais.
 
 ## GitHub Actions
 
-- `ci.yml` valida sintaxe Python, testes e lint em Pull Requests e pushes para `main`.
-- `release-on-main.yml` cria um GitHub Release de pré-lançamento por cada commit distinto recebido num push para `main`, com tag `main-<sha-curto>`. Os releases iniciais contêm o código-fonte; os instaladores/binários serão anexados quando os targets desktop/mobile forem implementados. A numeração SemVer de versões estáveis será definida quando o fluxo de distribuição/autoupdate estiver implementado.
+- `ci.yml` valida Python e faz typecheck/build das apps web e mobile em Pull Requests e pushes para `main`.
+- `release-on-main.yml` cria um GitHub pré-release por commit distinto recebido em `main`, com tag `main-<sha-curto>`. O release contém o snapshot do código; não substitui publicação da app nas lojas.
 
 ## Variáveis de ambiente
 
-Configura os valores de produção diretamente nas definições de ambiente da Vercel. Não commitar segredos.
+- Web: ver [`apps/web/.env.example`](./apps/web/.env.example); em produção configurar na Vercel.
+- Mobile: ver [`apps/mobile/.env.example`](./apps/mobile/.env.example); valores públicos do Supabase e URL da API Vercel são incluídos no bundle, não colocar segredos nestas variáveis.
+- Não commitar segredos.
+
+## Mobile e atualizações
+
+```powershell
+cd apps/mobile
+npm ci
+npm run dev
+npm run build
+npm run cap:sync
+```
+
+O mobile usa Capacitor para Android/iOS e Konsta UI para a interface. Os projetos nativos já estão no repositório. A web recebe deploy automático pela Vercel. As atualizações nativas são distribuídas pelas lojas e instaladas conforme as preferências do dispositivo; cada atualização nativa requer build assinado, credenciais de publicação e aprovação da loja. O projeto ainda não tem contas/segredos das lojas nem pipeline de publicação configurados.
+
+Para login Google e confirmação de email nativos, autoriza `com.musician.app://auth/callback` em Supabase **Authentication > URL Configuration**. O deep link já está registrado nos projetos Android/iOS. A URL da API Vercel no mobile permite os origins nativos padrão `https://localhost` e `capacitor://localhost`; origins customizados usam `MOBILE_APP_ORIGIN` no servidor.
+
+> Não usar atualizações OTA para contornar a revisão das lojas. O código nativo deve ser distribuído pelos canais oficiais.
 
 ## Licença
 

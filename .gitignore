@@ -29,7 +29,15 @@ node_modules/
 dist/
 build/
 coverage/
+*.tsbuildinfo
 .DS_Store
+
+# Capacitor native build artifacts
+apps/mobile/android/.gradle/
+apps/mobile/android/app/build/
+apps/mobile/ios/App/Pods/
+apps/mobile/ios/App/build/
+apps/mobile/ios/App/DerivedData/
 
 # IDE
 .vscode/

@@ -16,6 +16,11 @@ Desenvolver o Musician: uma aplicação web/mobile para biblioteca musical, play
 
 ## Estado atual — implementado nesta fundação
 
+- [x] App web Next.js/React/HeroUI com login/cadastro, Google OAuth, biblioteca, busca, embeds, favoritos e playlists.
+- [x] App mobile React/Capacitor/Konsta UI com autenticação, embeds, biblioteca, favoritos e playlists.
+- [x] API autenticada que valida IDs de YouTube/Spotify e obtém metadados sem descarregar áudio.
+- [x] Contrato opcional para provedor de letras licenciado; ausência de provedor/resultado é apresentada ao utilizador.
+- [x] Layout web com player e letra em colunas; layout mobile em coluna com player antes da letra.
 - [x] Estrutura inicial de projeto.
 - [x] Código CLI recebido movido para `services/processor/main.py`, mantendo `main.py` como entrypoint compatível.
 - [x] Extração de `identificar_link` e `parsear_lrc` para `services/processor/domain.py`.
@@ -27,16 +32,11 @@ Desenvolver o Musician: uma aplicação web/mobile para biblioteca musical, play
 ## Ainda por fazer
 
 1. Confirmar decisões de arquitetura e executar auditoria de dependências/licenças.
-2. Criar o projeto Supabase alojado, aplicar a migration pelo Dashboard e configurar autenticação e redirect URLs de produção.
-3. Criar frontend Next.js/HeroUI e frontend mobile React/Capacitor/Konsta UI.
-4. Criar clientes Supabase tipados e fluxos de autenticação.
-5. Implementar players oficiais YouTube/Spotify e sincronização com as letras.
-6. Remover o download de música como fluxo padrão; nunca tentar extrair áudio dos embeds.
-7. Construir API/worker para receber uploads autorizados e executar Demucs/Whisper fora de funções serverless curtas.
-8. Implementar gestão de playlists, favoritos e pesquisa de vídeos.
-9. Automatizar deploy Vercel e builds de distribuição.
-10. Implementar autoupdate para cada plataforma de distribuição suportada.
-11. Ampliar testes, observabilidade, segurança, acessibilidade e documentação.
+2. Criar os projetos Supabase/Vercel hospedados, aplicar a migration e configurar Email/Google, URLs e variáveis de produção.
+3. Selecionar e contratar/configurar provedor de letras com licença explícita para exibição no app.
+4. Assinar e publicar os projetos Android/iOS nas lojas com credenciais próprias.
+5. Configurar pipeline de builds/release mobile e acompanhar aprovação das lojas; atualizações nativas são entregues por elas.
+6. Ampliar testes de integração, observabilidade, acessibilidade e documentação.
 
 ## Versão de Python
 
@@ -52,6 +52,10 @@ Desenvolver o Musician: uma aplicação web/mobile para biblioteca musical, play
 - Auth/DB/Storage: Supabase (PostgreSQL, Auth, Storage e RLS).
 - Processamento pesado: worker Python independente com Demucs, Whisper e FFmpeg.
 - CI/CD: GitHub Actions.
+- Web: Vercel; cada push em `main` publica o site quando o repositório estiver conectado ao projeto.
+- Releases GitHub: um pré-release por commit distinto recebido em `main`.
+- Atualizações mobile: distribuição pelas lojas; não usar OTA para contornar revisão.
+- Letras: buscar somente num provedor cuja licença permita explicitamente armazenar e exibir o conteúdo no app.
 - Não colocar processamento pesado de Demucs/Whisper em funções serverless da Vercel.
 - Os embeds são players de terceiros; não fornecem o áudio original para Demucs.
 - O processamento requer um ficheiro fornecido pelo utilizador e cuja utilização esteja autorizada.
@@ -65,6 +69,8 @@ Desenvolver o Musician: uma aplicação web/mobile para biblioteca musical, play
 - Validar URLs e IDs externos antes de guardar ou incorporar conteúdo.
 - Não renderizar HTML/URLs fornecidas pelo utilizador sem sanitização/validação.
 - Não fazer scraping, download ou rehosting de áudio de plataformas a partir de embeds.
+- O fluxo web/mobile usa apenas oEmbed para metadados e iframes oficiais para reprodução; não chamar funções de download do CLI legado.
+- Nunca configurar um endpoint de letras sem verificar direitos de exibição, armazenamento, território e atribuição exigida pelo fornecedor.
 - Não expor tarefas de processamento de um utilizador a outro.
 
 ## Regras de desenvolvimento
@@ -94,6 +100,10 @@ python -m pytest
 ruff check .
 python -m compileall -q .
 ```
+
+Web (`apps/web`): `npm ci`, `npm run dev`, `npm run typecheck`, `npm run build`.
+
+Mobile (`apps/mobile`): `npm ci`, `npm run dev`, `npm run build`, `npm run cap:sync`. Os projetos Android/iOS e os deep links OAuth já estão versionados.
 
 ## Definition of Done
 

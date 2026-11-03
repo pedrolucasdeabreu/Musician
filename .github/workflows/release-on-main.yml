@@ -38,7 +38,7 @@ jobs:
                     "",
                     (commit.message ?? "").split("\n")[0],
                     "",
-                    "This release currently contains the source snapshot. Platform installers will be attached when build pipelines are implemented."
+                    "This pre-release contains the source snapshot for this commit. Native app builds and store publishing require platform signing credentials and store review."
                   ].join("\n"),
                   draft: false,
                   prerelease: true,

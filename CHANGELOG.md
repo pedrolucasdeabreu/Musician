@@ -7,6 +7,10 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-PT/1.1.0/) e o 
 ## [Unreleased]
 
 ### Added
+- Aplicação web Next.js/HeroUI e mobile Capacitor/Konsta UI com autenticação Supabase, biblioteca, favoritos, playlists e embeds oficiais.
+- Endpoint autenticado de metadados YouTube/Spotify e integração configurável com provedor licenciado de letras; sem baixar ou armazenar o áudio dos embeds.
+- CI para typecheck/build das apps web e mobile.
+- Instruções para deploy Vercel, configuração Supabase, deep links mobile e atualizações pelas lojas.
 - Instruções para configurar Supabase e Vercel diretamente nos serviços hospedados.
 - Testes pgTAP para verificar o isolamento RLS entre dois utilizadores (não executar em produção).
 - Estrutura inicial do projeto para aplicações web, mobile, serviço de processamento e Supabase.

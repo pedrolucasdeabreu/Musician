@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Musician</string>
+    <string name="title_activity_main">Musician</string>
+    <string name="package_name">com.musician.app</string>
+    <string name="custom_url_scheme">com.musician.app</string>
+</resources>
