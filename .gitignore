@@ -1,4 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
 .venv/
+venv/
+
+# Audio and generated output
 output/
 downloads/
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.ogg
+*.opus
+*.tmp
 catalogo_downloads.json
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Node / Next / Capacitor
+node_modules/
+.next/
+dist/
+build/
+coverage/
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

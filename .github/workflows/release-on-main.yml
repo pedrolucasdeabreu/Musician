@@ -1,0 +1,55 @@
+name: Release every commit on main
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create a GitHub pre-release for each pushed commit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create one release per distinct commit in this push
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const payloadCommits = context.payload.commits ?? [];
+            const commits = payloadCommits.filter((commit) => commit.distinct !== false);
+            const toRelease = commits.length > 0
+              ? commits
+              : [{ id: context.sha, message: "Push to main", timestamp: new Date().toISOString() }];
+
+            for (const commit of toRelease) {
+              const shortSha = commit.id.slice(0, 12);
+              const tagName = `main-${shortSha}`;
+
+              try {
+                await github.rest.repos.createRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_name: tagName,
+                  target_commitish: commit.id,
+                  name: `Musician main build ${shortSha}`,
+                  body: [
+                    `Automated pre-release for commit ${commit.id}.`,
+                    "",
+                    (commit.message ?? "").split("\n")[0],
+                    "",
+                    "This release currently contains the source snapshot. Platform installers will be attached when build pipelines are implemented."
+                  ].join("\n"),
+                  draft: false,
+                  prerelease: true,
+                  generate_release_notes: true
+                });
+                core.info(`Created ${tagName} for ${commit.id}`);
+              } catch (error) {
+                if (error.status === 422) {
+                  core.warning(`Release/tag ${tagName} already exists; skipping duplicate commit.`);
+                  continue;
+                }
+                throw error;
+              }
+            }

@@ -1,273 +1,81 @@
 # Musician
 
-Musician é uma ferramenta de linha de comandos para separar faixas de áudio em stems (vocais, bateria, baixo, piano, guitarra, etc.) usando Demucs, criar uma letra sincronizada e abrir um mixer local no navegador para ouvir e ajustar cada faixa individualmente.
+Aplicação para organizar músicas, acompanhar letras sincronizadas e, quando o utilizador fornece áudio que tem direito a processar, separar instrumentos e voz.
 
-O projeto foi pensado para trabalhar bem em fluxo local: baixa áudio de ficheiros locais ou links do YouTube/Spotify, separa as faixas, tenta gerar letra sincronizada com LRCLIB e Whisper, e depois disponibiliza um mixer HTML que corre localmente em `http://127.0.0.1:<porta>/mixer.html`.
+> **Estado:** fundação do projeto em desenvolvimento. O código Python original foi preservado como motor CLI. Web, mobile, autenticação e execução remota de tarefas ainda não estão implementados.
 
-## Funcionalidades
+## Objetivos de produto
 
-- Separação de áudio em stems com Demucs
-- Suporte a ficheiros locais e links do YouTube/Spotify
-- Cache de downloads em `downloads/` e catálogo em `catalogo_downloads.json`
-- Geração automática de letra sincronizada a partir de:
-  - ficheiro `.lrc` local
-  - LRCLIB
-  - transcrição do stem de vocais via Whisper
-- Mixer local com:
-  - play/pause/stop
-  - seek da reprodução
-  - controlo de volume, mute e solo por stem
-  - visualização de waveform por faixa
-  - sincronização de letra em tempo real
-- Reaproveitamento de músicas já baixadas para evitar repetição de downloads
+- Incorporar players oficiais do YouTube e Spotify para reprodução, sem descarregar automaticamente a música.
+- Mostrar vídeo e letra sincronizada lado a lado na web e em coluna no mobile.
+- Permitir contas, favoritos e playlists sincronizados entre dispositivos.
+- Permitir upload de áudio autorizado para processamento por Demucs/Whisper.
+- Disponibilizar web na Vercel e backend/dados no Supabase.
+- Manter licença GPL-3.0-only para o código do projeto, sujeita à auditoria de compatibilidade das dependências.
+
+## Estrutura
+
+```text
+apps/
+  web/                  # Next.js + HeroUI (a implementar)
+  mobile/               # React + Capacitor + Konsta UI (a implementar)
+services/
+  processor/            # Motor Python e funções de domínio
+supabase/
+  migrations/           # Esquema PostgreSQL e políticas RLS
+  tests/                # Testes pgTAP da base de dados e RLS (para DB isolada)
+.github/workflows/      # CI e releases automáticos
+ tests/                 # Testes automatizados
+```
 
 ## Requisitos
 
-- Python 3.8+ (o projeto foi desenvolvido com Python moderno e usa type hints)
-- FFmpeg instalado e disponível no `PATH`
-- Internet para:
-  - descarregar modelos Demucs na primeira vez
-  - consultar LRCLIB
-  - importar música a partir de YouTube/Spotify
-- Dependências Python listadas em `requirements.txt`
+- Python 3.14 (série suportada: `>=3.14,<3.15`). O ambiente local indicado em `.python-version` é 3.14.4.
+- O CI usa Python 3.14.10, uma atualização de manutenção da mesma série com correções de segurança.
+- Todas as dependências do projeto (processamento, testes e lint) são instaladas através do `requirements.txt` na raiz. O ficheiro `services/processor/requirements.txt` mantém a lista modular das dependências específicas do processador.
+- Para executar o mixer, o ficheiro `services/processor/mixer_template.html` também é necessário. Esse ficheiro não estava incluído no material inicial recebido e, por isso, não foi inventado nesta migração.
 
-## Instalação
-
-1. Clone ou abra a pasta do projeto.
-2. Crie um ambiente virtual (opcional, mas recomendado):
+## Executar o processador (modo CLI legado)
 
 ```bash
 python -m venv .venv
-```
-
-3. Ative o ambiente:
-
-Windows PowerShell:
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-Windows CMD:
-```cmd
-.venv\Scripts\activate.bat
-```
-
-Linux/macOS:
-```bash
-source .venv/bin/activate
-```
-
-4. Instale as dependências:
-
-```bash
+# Windows PowerShell: .venv\Scripts\Activate.ps1
+# macOS/Linux: source .venv/bin/activate
 python -m pip install -r requirements.txt
+python main.py --help
 ```
 
-5. Instale o FFmpeg e confirme que o comando funciona:
+A execução sem argumentos abre o menu CLI original. O comportamento atual de download do YouTube/Spotify é legado e **não deve ser usado como arquitetura da versão web/mobile**. A nova reprodução deve usar os embeds oficiais; o processamento de stems deve receber áudio fornecido pelo utilizador e autorizado para esse fim.
+
+## Testes e qualidade
 
 ```bash
-ffmpeg -version
+python -m pytest
+ruff check .
+python -m compileall -q .
 ```
 
-Se o FFmpeg não estiver no `PATH`, o programa tenta resolver a localização via `imageio-ffmpeg`, mas é recomendável garantir que o executável esteja acessível no terminal.
+## Produção: Supabase e Vercel
 
-## Estrutura do projeto
+O projeto conecta-se exclusivamente aos serviços hospedados; não mantém uma stack Supabase local.
 
-```text
-Musician/
-├── main.py                 # CLI principal e lógica do pipeline
-├── mixer_template.html     # Template do mixer local
-├── catalogo_downloads.json # catálogo de músicas já baixadas
-├── requirements.txt        # dependências Python
-├── downloads/              # ficheiros áudio baixados
-├── output/                 # stems e mixer gerados por música
-├── README.md               # documentação do projeto
-└── .gitignore
-```
+1. Cria o projeto no Supabase Dashboard.
+2. No **SQL Editor**, aplica uma única vez o conteúdo da migration em `supabase/migrations/`. Faz backup e confirma que estás no projeto de produção antes de executar SQL.
+3. Em **Authentication > URL Configuration**, define a URL de produção da aplicação como **Site URL** e adiciona os URLs de redirect usados pela aplicação.
+4. Em **Authentication > Sign In / Providers**, ativa os métodos de autenticação pretendidos. Para Google, configura as credenciais no Dashboard e usa o callback apresentado pelo Supabase: `https://<PROJECT_REF>.supabase.co/auth/v1/callback`.
+5. Na Vercel, configura as variáveis de ambiente de produção indicadas em `.env.example`, usando a URL e a chave pública do projeto Supabase. Publica a aplicação pela integração da Vercel.
 
-## Uso
+A migration cria as tabelas, políticas RLS e buckets privados `audio-inputs` e `audio-outputs`. O teste pgTAP em `supabase/tests/rls.test.sql` contém utilizadores e dados de teste; executa-o apenas numa base isolada, nunca na produção. A chave `SUPABASE_SERVICE_ROLE_KEY` é exclusivamente server-side/worker-side e nunca deve ser exposta ao browser, ao bundle mobile ou ao repositório.
 
-### 1) Separar uma música local
+## GitHub Actions
 
-```bash
-python main.py "C:\caminho\para\musica.mp3"
-```
+- `ci.yml` valida sintaxe Python, testes e lint em Pull Requests e pushes para `main`.
+- `release-on-main.yml` cria um GitHub Release de pré-lançamento por cada commit distinto recebido num push para `main`, com tag `main-<sha-curto>`. Os releases iniciais contêm o código-fonte; os instaladores/binários serão anexados quando os targets desktop/mobile forem implementados. A numeração SemVer de versões estáveis será definida quando o fluxo de distribuição/autoupdate estiver implementado.
 
-Se o ficheiro for local, o programa separa os stems no diretório `output/` e, por defeito, abre o mixer em navegador.
+## Variáveis de ambiente
 
-### 2) Separar a partir de um link do YouTube ou Spotify
-
-O programa também pode pedir a fonte de importação interativamente se nenhum ficheiro for passado:
-
-```bash
-python main.py
-```
-
-No menu, escolhe:
-- `1` para ficheiro local
-- `2` para YouTube
-- `3` para Spotify
-
-Também pode passar o link diretamente num comando, desde que o tipo seja válido. O áudio é guardado em `downloads/` e registado no catálogo.
-
-### 3) Usar o modelo de 4 stems em vez de 6
-
-```bash
-python main.py "musica.mp3" --4stems
-```
-
-Com esta opção, o Demucs usa o modelo `htdemucs` em vez de `htdemucs_6s`.
-
-### 4) Definir pasta de saída
-
-```bash
-python main.py "musica.mp3" --saida "meus_stems"
-```
-
-### 5) Separar sem abrir o mixer
-
-```bash
-python main.py "musica.mp3" --sem-mixer
-```
-
-### 6) Abrir um mixer de uma música já processada
-
-Se a música já foi separada e está em `output/`, basta indicar o nome da pasta correspondente:
-
-```bash
-python main.py --abrir "G-Eazy - Provide (Official Video) ft. Chris Brown, Mark Morrison"
-```
-
-Se quiser regenerar a letra de uma música já pronta:
-
-```bash
-python main.py --abrir "G-Eazy - Provide (Official Video) ft. Chris Brown, Mark Morrison" --letra
-```
-
-Também pode abrir um mixer sem ter de repetir a separação quando a música já está em cache no catálogo e no diretório `downloads/`:
-
-```bash
-python main.py --abrir "nome_da_musica"
-```
-
-Isto é útil quando a música já foi baixada anteriormente e o processamento já está concluído; o script só abre a pasta `output/<nome_da_musica>` e serve o HTML do mixer.
-
-### 7) Desativar a geração automática de letra
-
-```bash
-python main.py "musica.mp3" --sem-letra
-```
-
-### 8) Escolher o modelo de Whisper para a letra
-
-```bash
-python main.py "musica.mp3" --modelo-letra "large-v3"
-```
-
-### 9) Forçar um idioma para a transcrição da letra
-
-```bash
-python main.py "musica.mp3" --idioma "pt"
-```
-
-## Opções da CLI
-
-O programa expõe estas opções principais:
-
-```text
-usage: main.py [-h] [--saida SAIDA] [--abrir NOME] [--4stems] [--sem-mixer]
-               [--letra] [--sem-letra] [--modelo-letra MODELO_LETRA]
-               [--idioma IDIOMA] [arquivo]
-```
-
-Parâmetros:
-
-- `arquivo`: ficheiro local de áudio opcional
-- `--saida`: pasta de saída (padrão: `output`)
-- `--abrir NOME`: abre o mixer de uma música já processada em `output/NOME`
-- `--4stems`: usa `htdemucs` (4 stems)
-- `--sem-mixer`: separa sem abrir o mixer
-- `--letra`: gera ou regenera a letra quando usado com `--abrir`
-- `--sem-letra`: desativa a geração automática de letra
-- `--modelo-letra`: modelo Whisper a usar para transcrição (padrão: `large-v3`)
-- `--idioma`: idioma da música para a transcrição, por exemplo `pt`, `en`, `es`
-
-## Como funciona a separação
-
-Quando executas o programa:
-
-1. O ficheiro audio é validado ou o sistema pede a origem (local/YouTube/Spotify)
-2. O áudio é guardado em `downloads/` quando provém de URL
-3. O Demucs separa a faixa em stems em `output/<nome_da_musica>/`
-4. O programa procura letra usando, por ordem:
-   - ficheiro `.lrc` local
-   - LRCLIB
-   - transcrição do stem de vocais com Whisper
-5. O mixer HTML é gerado em `output/<nome_da_musica>/mixer.html`
-6. O navegador abre a interface local e o servidor HTTP fica ativo até pressionares `Ctrl+C`
-
-## Saída esperada
-
-Um processamento bem-sucedido cria algo do género:
-
-```text
-output/
-└── G-Eazy - Provide (Official Video) ft. Chris Brown, Mark Morrison/
-    ├── bass.wav
-    ├── drums.wav
-    ├── guitar.wav
-    ├── letra.json
-    ├── mixer.html
-    ├── other.wav
-    ├── piano.wav
-    ├── vocals.wav
-    └── ...
-```
-
-## Observações importantes
-
-- O Demucs pode demorar alguns minutos, especialmente na primeira execução
-- A primeira vez que usa um modelo novo pode exigir ligação à internet
-- O mixer corre em localhost e não depende de um serviço externo
-- O ficheiro `catalogo_downloads.json` serve como cache para não repetir downloads do mesmo áudio
-- Se a música não for encontrada no LRCLIB, o programa tenta transcrever a letra com Whisper usando o stem de vocais
-
-## Troubleshooting
-
-### `ffmpeg` não encontrado
-
-Certifica-te de que o FFmpeg está instalado e que o comando `ffmpeg` está disponível:
-
-```bash
-ffmpeg -version
-```
-
-### Demucs falha ao separar
-
-Confirma que o ambiente tem todas as dependências instaladas e que o Python usado é o mesmo em que fizeste `pip install -r requirements.txt`.
-
-### Mixer não abre
-
-O programa abre o navegador automaticamente, mas também podes abrir manualmente a URL indicada no terminal.
-
-### Letra não aparece no mixer
-
-Pode acontecer quando:
-- a música não foi encontrada no LRCLIB
-- a transcrição do Whisper não encontrou palavras suficientes
-- o stem `vocals.wav` não foi gerado corretamente
-
-Nesses casos, o programa tenta continuar sem quebrar o fluxo e indica avisos no terminal.
+Configura os valores de produção diretamente nas definições de ambiente da Vercel. Não commitar segredos.
 
 ## Licença
 
-Este projeto não incluiu uma licença explícita no repositório, pelo que a utilização deve seguir o contexto do projeto e os termos do código de terceiros utilizados (Demucs, Whisper, LRCLIB, spotDL, yt-dlp, etc.).
-
-## Contribuição
-
-Se quiseres melhorar o projeto, podes:
-
-- otimizar a lógica de geração de letra
-- melhorar o mixer visual
-- adicionar suporte a mais fontes de áudio
-- tratar mais edge cases de metadados e download
+Este projeto é distribuído sob GPL-3.0-only. Ver `LICENSE`. As dependências, modelos, bibliotecas e conteúdos de terceiros mantêm as respetivas licenças e termos; a inclusão no projeto não os relicencia automaticamente.

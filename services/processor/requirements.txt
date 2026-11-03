@@ -1,0 +1,8 @@
+# Audio processing runtime. Pin and audit versions before production releases.
+requests
+imageio-ffmpeg
+faster-whisper
+yt-dlp
+mutagen
+demucs
+spotdl

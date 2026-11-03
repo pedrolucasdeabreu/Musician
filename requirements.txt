@@ -1,9 +1,6 @@
-demucs
-numpy
-faster-whisper
-av<19
-mutagen
-requests
-imageio-ffmpeg
-yt-dlp
-spotDL
+# Dependências de execução do processador
+-r services/processor/requirements.txt
+
+# Ferramentas de testes e qualidade (incluídas na instalação normal do projeto)
+pytest
+ruff
