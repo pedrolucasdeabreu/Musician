@@ -8,7 +8,7 @@ export default async function HomePage() {
   const supabase = await createClient();
   const { data, error } = await supabase.auth.getUser();
 
-  if (error) {
+  if (error && error.name !== "AuthSessionMissingError") {
     throw new Error(`Não foi possível verificar sua sessão: ${error.message}`);
   }
   if (!data.user) {

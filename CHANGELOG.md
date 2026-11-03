@@ -21,6 +21,7 @@ O formato segue [Keep a Changelog](https://keepachangelog.com/pt-PT/1.1.0/) e o 
 - Workflow de CI e workflow de pré-release por commit distinto recebido na branch `main`.
 
 ### Changed
+- A página inicial encaminha sessões ausentes para login em vez de responder com erro 500.
 - Removida a configuração da Supabase CLI para stack local; migrations e autenticação são configuradas no Supabase hospedado.
 - Centralizadas as dependências do processador, testes e lint no `requirements.txt` da raiz; removido `requirements-dev.txt`.
 - Padronizada a série Python 3.14; o ambiente local está registado como 3.14.4 e o CI valida com 3.14.10.
