@@ -23,6 +23,22 @@ catalogo_downloads.json
 .env.*
 !.env.example
 
+# Private keys, signing material, and service credentials
+.ssh/
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+*.provisionprofile
+credentials*.json
+service-account*.json
+firebase-adminsdk*.json
+secrets/
+secret/
+
 # Node / Next / Capacitor
 node_modules/
 .next/
